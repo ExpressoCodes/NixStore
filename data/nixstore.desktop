@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NixStore
+GenericName=Package Manager
+Comment=Search, install and remove system packages
+Exec=nixstore
+Icon=nixstore
+Terminal=true
+Categories=System;PackageManager;
+Keywords=install;remove;uninstall;package;nix;software;app;store;
