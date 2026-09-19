@@ -55,8 +55,7 @@ Add the flake to your system flake:
 }
 ```
 
-Enable it in `configuration.nix` and create the package list next to your
-`flake.nix` (`echo '[]' | sudo tee /etc/nixos/packages.json`):
+Enable it in `configuration.nix`:
 
 ```nix
 { pkgs, ... }:
@@ -64,14 +63,25 @@ Enable it in `configuration.nix` and create the package list next to your
   programs.nixstore = {
     enable = true;
     packagesFile = ./packages.json;
+    # Optional: what the list starts with when it is created.
+    initialPackages = [ "git" "firefox" ];
     # Optional: open in a specific terminal instead of the desktop default.
     terminalCommand = "${pkgs.kitty}/bin/kitty --class nixstore --title NixStore";
   };
 }
 ```
 
+`packages.json` doesn't have to exist yet: the first `nixos-rebuild switch`
+creates it next to your `flake.nix` from `initialPackages` (default `[]`). After
+that it is never overwritten, not by rebuilds and not by `nix flake update`,
+because the file lives in your flake, not in this one. It is your data; NixStore
+only edits it when you install or remove something.
+
 You can move packages from `environment.systemPackages` into `packages.json`
 to manage them with NixStore.
+
+> If your system flake is a git repository, run `git add packages.json` once
+> after it is created. Nix ignores untracked files in git flakes.
 
 ### Options
 
@@ -81,6 +91,7 @@ to manage them with NixStore.
 | `programs.nixstore.packagesFile` | `null` | JSON package list added to `environment.systemPackages` |
 | `programs.nixstore.flake` | `"/etc/nixos"` | System flake directory to edit and rebuild |
 | `programs.nixstore.packagesFilePath` | `"<flake>/packages.json"` | Where `packagesFile` is on disk |
+| `programs.nixstore.initialPackages` | `[ ]` | Contents when `packagesFile` is first created |
 | `programs.nixstore.terminalCommand` | `null` | Terminal command for the desktop entry (`null` = `Terminal=true`) |
 | `programs.nixstore.package` | this flake | Package to use |
 
