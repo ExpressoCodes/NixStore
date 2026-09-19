@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nixstore"
+version = "0.1.0"
+description = "Search, install and remove NixOS packages from a TUI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["textual>=0.80"]
+
+[project.scripts]
+nixstore = "nixstore.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nixstore"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Textual declares BINDINGS as class-level lists.
+ignore = ["RUF012"]
