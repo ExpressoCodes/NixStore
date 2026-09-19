@@ -159,6 +159,93 @@ class ApplyScreen(ModalScreen[bool]):
             self.running = False
 
 
+class UpdateScreen(ModalScreen[bool]):
+    """Check for and apply dotfiles upstream updates."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.running = False
+        self.succeeded = False
+        self._repo = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Dotfiles updates", id="dialog-title")
+            yield Static(id="update-status")
+            yield Input(password=True, placeholder="sudo password (needed for nixos-rebuild)", id="update-password")
+            yield RichLog(id="update-log", wrap=True, markup=False)
+            yield Label("Checking…", id="update-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#update-log").display = False
+        self.query_one("#update-password").display = False
+        self.check_updates()
+
+    def set_footer(self, text: str, style: str = "") -> None:
+        self.query_one("#update-footer", Label).update(Text(text, style=style))
+
+    def action_close(self) -> None:
+        if not self.running:
+            self.dismiss(self.succeeded)
+
+    @work(exclusive=True)
+    async def check_updates(self) -> None:
+        self.running = True
+        try:
+            status = await asyncio.to_thread(core.check_dotfiles_updates)
+            if status is None:
+                self.query_one("#update-status", Static).update(
+                    Text("Dotfiles repo not found.\nRun install.sh first.", "dim"))
+                self.set_footer("Esc: close")
+                return
+            if status.up_to_date:
+                self.query_one("#update-status", Static).update(
+                    Text("✓ Already up to date.", "bold green"))
+                self.set_footer("Esc: close")
+                return
+            summary = Text()
+            summary.append(f"{status.count} update(s) available:\n\n", "bold")
+            for c in status.commits[:8]:
+                summary.append(f"  {c}\n", "dim")
+            self.query_one("#update-status", Static).update(summary)
+            self._repo = status.repo
+            self.query_one("#update-password").display = True
+            self.query_one("#update-password").focus()
+            self.set_footer("Enter sudo password to apply · Esc: cancel")
+        finally:
+            self.running = False
+
+    @on(Input.Submitted, "#update-password")
+    def password_submitted(self, event: Input.Submitted) -> None:
+        if not self.running and not self.succeeded:
+            password = event.value
+            event.input.value = ""
+            self.apply_updates(password)
+
+    @work(exclusive=True)
+    async def apply_updates(self, password: str) -> None:
+        self.running = True
+        log = self.query_one("#update-log", RichLog)
+        self.query_one("#update-password").display = False
+        log.display = True
+        self.set_footer("Updating… (this can take a while)", "bold yellow")
+        try:
+            async def write_log(line: str) -> None:
+                log.write(Text.from_ansi(line))
+            ok = await core.run_dotfiles_update(self._repo, password, write_log)
+            if ok:
+                self.succeeded = True
+                self.set_footer("✓ Done — Esc: back · Ctrl+Q: quit", "bold green")
+                core.notify("Dotfiles updated", "System config is up to date")
+            else:
+                self.set_footer("✗ Update failed — see log above · Esc: back", "bold red")
+                core.notify("Dotfiles update failed", "", "critical")
+        finally:
+            self.running = False
+
+
 class NixStore(App):
     TITLE = "NixStore"
 
@@ -169,7 +256,7 @@ class NixStore(App):
     PackageTable { height: 1fr; }
     #details { height: 5; border: round $primary-darken-2; padding: 0 1; }
     #pending { height: 1; padding: 0 1; background: $boost; }
-    ApplyScreen { align: center middle; }
+    ApplyScreen, UpdateScreen { align: center middle; }
     #dialog {
         width: 90%; height: 85%; padding: 1 2;
         border: thick $primary; background: $surface;
@@ -183,6 +270,7 @@ class NixStore(App):
     BINDINGS = [
         Binding("tab", "next_tab", "Switch tab", priority=True),
         Binding("ctrl+s", "apply", "Apply changes"),
+        Binding("ctrl+u", "updates", "Check updates"),
         Binding("escape", "back", "Clear / quit"),
     ]
 
@@ -420,6 +508,13 @@ class NixStore(App):
             self.active_input().focus()
 
         self.push_screen(ApplyScreen(self.cfg, dict(self.pending), self.installed), done)
+
+    def action_updates(self) -> None:
+        if not self.on_main_screen():
+            return
+        def done(succeeded: bool | None) -> None:
+            self.active_input().focus()
+        self.push_screen(UpdateScreen(), done)
 
     def action_back(self) -> None:
         box = self.active_input()
