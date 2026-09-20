@@ -207,23 +207,23 @@ def notify(summary: str, body: str, urgency: str = "normal") -> None:
         pass
 
 
+VARS_FILE = Path("/etc/nixos/.dotfiles-vars")
+
+
+def read_dotfiles_vars() -> dict[str, str]:
+    if not VARS_FILE.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in VARS_FILE.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            result[k.strip()] = v.strip()
+    return result
+
+
 # --- system update helpers ----------------------------------------------------
 
 import shutil
-
-UPDATE_SCRIPT = """
-set -e
-FLAKE="$1"
-cd "$FLAKE"
-if [ -d .git ]; then
-  echo "==> git pull"
-  git pull --ff-only
-fi
-echo "==> nix flake update"
-nix flake update
-echo "==> nixos-rebuild switch"
-nixos-rebuild switch --flake "$FLAKE"
-"""
 
 
 @dataclass(frozen=True)
@@ -238,13 +238,16 @@ class SystemUpdateStatus:
 
 
 def check_system_updates(flake: Path) -> SystemUpdateStatus:
-    """If the flake dir is a git repo, fetch origin and report pending commits."""
-    if not (flake / ".git").exists():
+    """Check DOTFILES_REPO (from VARS_FILE) for pending commits; fall back to flake."""
+    vars_ = read_dotfiles_vars()
+    repo_str = vars_.get("DOTFILES_REPO")
+    repo = Path(repo_str) if repo_str else flake
+    if not (repo / ".git").exists():
         return SystemUpdateStatus(is_git_repo=False, commits_behind=0, commits=[])
     git = shutil.which("git") or "git"
 
     def run(*args: str) -> str:
-        r = subprocess.run([git, "-C", str(flake), *args], capture_output=True, text=True)
+        r = subprocess.run([git, "-C", str(repo), *args], capture_output=True, text=True)
         return r.stdout.strip() if r.returncode == 0 else ""
 
     run("fetch", "--quiet", "origin")
@@ -260,21 +263,74 @@ def check_system_updates(flake: Path) -> SystemUpdateStatus:
 
 
 async def run_system_update(flake: Path, password: str, log_cb) -> bool:  # noqa: ANN001
-    """git pull (if git repo) → nix flake update → nixos-rebuild switch, streamed."""
-    proc = await asyncio.create_subprocess_exec(
-        "sudo", "-S", "-k", "-p", "", "sh", "-c", UPDATE_SCRIPT, "nixstore", str(flake),
+    """git-pull dotfiles (self-updating update.sh) then run it non-interactively."""
+    vars_ = read_dotfiles_vars()
+    dotfiles_str = vars_.get("DOTFILES_REPO")
+    if not dotfiles_str:
+        await log_cb("DOTFILES_REPO not set in /etc/nixos/.dotfiles-vars — run install.sh first.")
+        return False
+    dotfiles = Path(dotfiles_str)
+    update_sh = dotfiles / "update.sh"
+    if not update_sh.exists():
+        await log_cb(f"update.sh not found at {update_sh}")
+        return False
+
+    # Authenticate sudo (creates / refreshes credential cache).
+    auth = await asyncio.create_subprocess_exec(
+        "sudo", "-Skp", "", "true",
         stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
     )
-    proc.stdin.write((password + "\n").encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
+    auth.stdin.write((password + "\n").encode())
+    await auth.stdin.drain()
+    auth.stdin.close()
     del password
-    async for raw in proc.stdout:
-        await log_cb(raw.decode(errors="replace").rstrip("\n"))
-    await proc.wait()
-    return proc.returncode == 0
+    await auth.wait()
+    if auth.returncode != 0:
+        await log_cb("sudo: incorrect password.")
+        return False
+
+    # Keep sudo session alive during the long operation.
+    async def _keepalive() -> None:
+        while True:
+            await asyncio.sleep(50)
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "true",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+
+    ka = asyncio.create_task(_keepalive())
+
+    async def _stream(cmd: list[str], env: dict | None = None) -> int:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        async for raw in proc.stdout:
+            await log_cb(raw.decode(errors="replace").rstrip("\n"))
+        await proc.wait()
+        return proc.returncode
+
+    try:
+        # Pull dotfiles — this self-updates update.sh before we run it.
+        await log_cb(f"==> git pull {dotfiles}")
+        rc = await _stream(["git", "-C", str(dotfiles), "pull", "--ff-only"])
+        if rc != 0:
+            await log_cb("git pull failed — aborting.")
+            return False
+
+        # Run the freshly-pulled update.sh non-interactively.
+        # --no-pull skips its own git pull (we already did it above).
+        await log_cb("==> Running update.sh")
+        env = {**os.environ, "NIXSTORE_NONINTERACTIVE": "1"}
+        rc = await _stream(["bash", str(update_sh), "--no-pull"], env=env)
+        return rc == 0
+    finally:
+        ka.cancel()
 
 
 # --- flatpak ------------------------------------------------------------------
