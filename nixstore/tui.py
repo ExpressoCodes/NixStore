@@ -229,27 +229,88 @@ class FlatpakApplyScreen(ModalScreen[bool]):
 
 # ── system update panel ────────────────────────────────────────────────────────
 
+class UpdateApplyScreen(ModalScreen[bool]):
+    """Modal that authenticates sudo and streams the system update."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, cfg: Config, status_text: Text) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.status_text = status_text
+        self.running = False
+        self.succeeded = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Apply System Update", id="dialog-title")
+            yield Static(self.status_text, id="su-modal-status")
+            yield Input(password=True, placeholder="sudo password", id="su-modal-password")
+            yield RichLog(id="su-modal-log", wrap=True, markup=False)
+            yield Label("Enter sudo password and press Enter to apply.", id="su-modal-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#su-modal-log").display = False
+        self.query_one("#su-modal-password").focus()
+
+    def _set_footer(self, text: str, style: str = "") -> None:
+        self.query_one("#su-modal-footer", Label).update(Text(text, style=style))
+
+    def action_close(self) -> None:
+        if not self.running:
+            self.dismiss(self.succeeded)
+
+    @on(Input.Submitted, "#su-modal-password")
+    def password_submitted(self, event: Input.Submitted) -> None:
+        if not self.running:
+            password = event.value
+            event.input.value = ""
+            self.apply_updates(password)
+
+    @work(exclusive=True)
+    async def apply_updates(self, password: str) -> None:
+        self.running = True
+        log = self.query_one("#su-modal-log", RichLog)
+        self.query_one("#su-modal-password").display = False
+        log.display = True
+        self._set_footer("Updating… (this can take a while)", "bold yellow")
+        try:
+            async def write_log(line: str) -> None:
+                log.write(Text.from_ansi(line))
+
+            ok = await core.run_system_update(self.cfg.flake, password, write_log)
+            if ok:
+                self.succeeded = True
+                self._set_footer("✓ Done — Esc to close.", "bold green")
+                core.notify("System updated", "nix flake update + nixos-rebuild succeeded")
+            else:
+                self._set_footer("✗ Update failed — see log above · Esc to close.", "bold red")
+                core.notify("System update failed", "", "critical")
+        finally:
+            self.running = False
+
+
 class SystemUpdatePanel(Vertical):
-    """Full-panel system update view — self-contained, no external scripts needed."""
+    """Shows update status; Enter opens UpdateApplyScreen modal."""
 
     can_focus = True
-    BINDINGS = [Binding("r", "action_recheck", "Re-check")]
+    BINDINGS = [
+        Binding("r", "action_recheck", "Re-check"),
+        Binding("enter", "action_apply_update", "Apply", show=False),
+    ]
 
     def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
         self.cfg = cfg
         self._running = False
+        self._status_text: Text | None = None
 
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
         yield Static("Checking…", id="su-status")
-        yield Input(password=True, placeholder="sudo password (needed for nixos-rebuild)", id="su-password")
-        yield RichLog(id="su-log", wrap=True, markup=False)
         yield Label("", id="su-footer")
 
     def on_mount(self) -> None:
-        self.query_one("#su-password").display = False
-        self.query_one("#su-log").display = False
         self.check_updates()
 
     def _set_footer(self, text: str, style: str = "") -> None:
@@ -257,19 +318,25 @@ class SystemUpdatePanel(Vertical):
 
     def action_recheck(self) -> None:
         if not self._running:
-            self.query_one("#su-log").display = False
-            self.query_one("#su-password").display = False
+            self._status_text = None
             self.query_one("#su-status", Static).update(Text("Checking…", "dim"))
             self._set_footer("")
             self.check_updates()
+
+    def action_apply_update(self) -> None:
+        if self._status_text is not None and not self._running:
+            def done(succeeded: bool | None) -> None:
+                if succeeded:
+                    self.action_recheck()
+                else:
+                    self.focus()
+            self.app.push_screen(UpdateApplyScreen(self.cfg, self._status_text), done)
 
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
         status_widget = self.query_one("#su-status", Static)
         status_widget.update(Text("Checking…", "dim"))
-        self.query_one("#su-password").display = False
-        self.query_one("#su-log").display = False
         self._set_footer("")
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
@@ -287,39 +354,8 @@ class SystemUpdatePanel(Vertical):
                 summary.append("git pull  →  ", "dim")
             summary.append("nix flake update  →  nixos-rebuild switch", "dim")
             status_widget.update(summary)
-            pw = self.query_one("#su-password")
-            pw.display = True
-            pw.focus()
-            self._set_footer("Enter sudo password and press Enter to apply.")
-        finally:
-            self._running = False
-            self.focus()
-
-    @on(Input.Submitted, "#su-password")
-    def password_submitted(self, event: Input.Submitted) -> None:
-        if not self._running:
-            password = event.value
-            event.input.value = ""
-            self.apply_updates(password)
-
-    @work(exclusive=True, group="su-apply")
-    async def apply_updates(self, password: str) -> None:
-        self._running = True
-        log = self.query_one("#su-log", RichLog)
-        self.query_one("#su-password").display = False
-        log.display = True
-        self._set_footer("Updating… (this can take a while)", "bold yellow")
-        try:
-            async def write_log(line: str) -> None:
-                log.write(Text.from_ansi(line))
-
-            ok = await core.run_system_update(self.cfg.flake, password, write_log)
-            if ok:
-                self._set_footer("✓ Done. Press r to re-check.", "bold green")
-                core.notify("System updated", "nix flake update + nixos-rebuild succeeded")
-            else:
-                self._set_footer("✗ Update failed — see log above. Press r to re-check.", "bold red")
-                core.notify("System update failed", "", "critical")
+            self._status_text = summary
+            self._set_footer("Press Enter to apply · r to re-check")
         finally:
             self._running = False
             self.focus()
@@ -877,9 +913,14 @@ class NixStore(App):
     SystemUpdatePanel { height: 1fr; }
     #su-title { text-style: bold; margin-bottom: 1; }
     #su-status { height: auto; margin-bottom: 1; }
-    #su-password { margin-bottom: 1; }
-    #su-log { height: 1fr; border: round $primary-darken-2; }
     #su-footer { margin-top: 1; }
+
+    /* ── update apply modal ── */
+    UpdateApplyScreen { align: center middle; }
+    #su-modal-status { height: auto; margin-bottom: 1; }
+    #su-modal-password { margin-bottom: 1; }
+    #su-modal-log { height: 1fr; border: round $primary-darken-2; }
+    #su-modal-footer { margin-top: 1; }
 
     /* ── shared package panel ── */
     NixPackagesPanel, FlatpakPackagesPanel { padding: 0 1; }
