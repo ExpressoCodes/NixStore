@@ -12,8 +12,10 @@ Nix files by hand.
 
 - **Live search** across your flake's pinned nixpkgs: exact names first, then
   prefixes, then substrings (`brave` → `brave`, `brave-origin`, `brave-search-cli`)
-- **Queue changes** from the *Search* and *Installed* tabs, apply them together
+- **Flatpak support**: search and manage Flathub apps alongside Nix packages
+- **Queue changes** from the *Search* and *Installed* sub-tabs, apply them together
 - **Safe rebuilds**: if `nixos-rebuild` fails, your package list is restored
+- **System Update panel**: check for dotfiles upstream commits and apply them in one step
 - **CLI** for scripts: `nixstore install btop`, `nixstore remove btop`, …
 - Desktop entry with icon, so it shows up in rofi, fuzzel, GNOME, KDE, …
 
@@ -104,12 +106,18 @@ Without the module: `nix run github:ExpressoCodes/nixstore`, or use
 Launch **NixStore** from your app launcher, or run `nixstore`
 (`nixstore tui btop` opens it with a search).
 
+The sidebar has three sections — navigate with the mouse or arrow keys:
+
+- **Nix Packages** — search nixpkgs and manage your `packages.json`
+- **Flatpak** — search Flathub and manage installed Flatpak apps
+- **System Update** — check for upstream dotfiles commits and apply them
+
 | Key | Action |
 | --- | --- |
-| type | Search (Search tab) or filter (Installed tab) |
+| type | Search (Search sub-tab) or filter (Installed sub-tab) |
 | `↑` `↓` `PgUp` `PgDn` | Move through results |
 | `Enter` / click | Mark for install `+` / removal `−`, again to undo |
-| `Tab` | Switch between *Search nixpkgs* and *Installed* |
+| `Tab` | Switch between *Search* and *Installed* sub-tabs |
 | `Ctrl+S` | Review changes, enter sudo password, rebuild |
 | `Esc` | Clear the search box, then quit |
 
