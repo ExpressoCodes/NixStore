@@ -231,6 +231,11 @@ class SystemUpdateStatus:
     is_git_repo: bool
     commits_behind: int
     commits: list[str]  # one-line summaries of unpulled commits
+    flake_inputs_updated: list[str]  # flake input names whose rev would change
+
+    @property
+    def has_updates(self) -> bool:
+        return self.commits_behind > 0 or bool(self.flake_inputs_updated)
 
     @property
     def git_up_to_date(self) -> bool:
@@ -238,12 +243,12 @@ class SystemUpdateStatus:
 
 
 def check_system_updates(flake: Path) -> SystemUpdateStatus:
-    """Check DOTFILES_REPO (from VARS_FILE) for pending commits; fall back to flake."""
+    """Check dotfiles repo for pending commits and flake inputs for available updates."""
     vars_ = read_dotfiles_vars()
     repo_str = vars_.get("DOTFILES_REPO")
     repo = Path(repo_str) if repo_str else flake
     if not (repo / ".git").exists():
-        return SystemUpdateStatus(is_git_repo=False, commits_behind=0, commits=[])
+        return SystemUpdateStatus(is_git_repo=False, commits_behind=0, commits=[], flake_inputs_updated=[])
     git = shutil.which("git") or "git"
 
     def run(*args: str) -> str:
@@ -256,10 +261,60 @@ def check_system_updates(flake: Path) -> SystemUpdateStatus:
               or run("rev-parse", "origin/main")
               or run("rev-parse", "origin/master"))
     if not local or not remote or local == remote:
-        return SystemUpdateStatus(is_git_repo=True, commits_behind=0, commits=[])
-    count = int(run("rev-list", "--count", f"HEAD..{remote}") or "0")
-    commits = [c for c in run("log", "--oneline", f"HEAD..{remote}").splitlines() if c]
-    return SystemUpdateStatus(is_git_repo=True, commits_behind=count, commits=commits)
+        commits_behind, commits = 0, []
+    else:
+        commits_behind = int(run("rev-list", "--count", f"HEAD..{remote}") or "0")
+        commits = [c for c in run("log", "--oneline", f"HEAD..{remote}").splitlines() if c]
+
+    flake_inputs_updated = _check_flake_inputs(flake)
+    return SystemUpdateStatus(
+        is_git_repo=True,
+        commits_behind=commits_behind,
+        commits=commits,
+        flake_inputs_updated=flake_inputs_updated,
+    )
+
+
+def _check_flake_inputs(flake: Path) -> list[str]:
+    """Run nix flake update in a temp dir to detect which inputs would change."""
+    flake_nix = flake / "flake.nix"
+    flake_lock = flake / "flake.lock"
+    if not flake_nix.exists() or not flake_lock.exists():
+        return []
+
+    try:
+        orig_lock = json.loads(flake_lock.read_text())
+    except Exception:
+        return []
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="nixstore-flake-check-") as tmpdir:
+            tmppath = Path(tmpdir)
+            shutil.copy(flake_nix, tmppath / "flake.nix")
+            shutil.copy(flake_lock, tmppath / "flake.lock")
+
+            result = subprocess.run(
+                ["nix", "flake", "update", "--flake", str(tmppath)],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                return []
+
+            new_lock = json.loads((tmppath / "flake.lock").read_text())
+
+        orig_nodes = orig_lock.get("nodes", {})
+        new_nodes = new_lock.get("nodes", {})
+        changed = []
+        for name, node in new_nodes.items():
+            if name == "root":
+                continue
+            orig_rev = orig_nodes.get(name, {}).get("locked", {}).get("rev", "")
+            new_rev = node.get("locked", {}).get("rev", "")
+            if orig_rev and new_rev and orig_rev != new_rev:
+                changed.append(name)
+        return changed
+    except Exception:
+        return []
 
 
 async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # noqa: ANN001
