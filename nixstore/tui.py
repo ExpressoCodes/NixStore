@@ -980,7 +980,7 @@ class NixStore(App):
 
     BINDINGS = [
         Binding("tab", "next_tab", "Switch tab", priority=True),
-        Binding("ctrl+s", "apply", "Apply changes"),
+        Binding("ctrl+s", "apply", "Apply changes", show=False),
         Binding("escape", "back", "Clear / quit"),
         Binding("r", "recheck_updates", "Re-check", show=False),
         Binding("u", "apply_system_update", "Apply update", show=False),
