@@ -374,17 +374,44 @@ async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # n
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-            async for raw in proc.stdout:
-                await log_cb(raw.decode(errors="replace").rstrip("\n"))
+
+            async def _drain() -> None:
+                async for raw in proc.stdout:
+                    await log_cb(raw.decode(errors="replace").rstrip("\n"))
+
+            drain_task = asyncio.create_task(_drain())
             await proc.wait()
+            try:
+                await asyncio.wait_for(drain_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                drain_task.cancel()
             return proc.returncode
+
+        # Stash any local changes so git pull --ff-only won't be blocked.
+        await log_cb(f"==> git stash {dotfiles}")
+        stash_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(dotfiles), "stash", "--include-untracked",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stash_out_bytes, _ = await stash_proc.communicate()
+        stash_out = stash_out_bytes.decode(errors="replace").strip()
+        await log_cb(stash_out)
+        something_stashed = "No local changes to save" not in stash_out
 
         # Pull dotfiles — self-updates update.sh before we run it.
         await log_cb(f"==> git pull {dotfiles}")
         rc = await _stream(["git", "-C", str(dotfiles), "pull", "--ff-only"])
         if rc != 0:
+            if something_stashed:
+                await log_cb("==> git stash pop (restoring changes after failed pull)")
+                await _stream(["git", "-C", str(dotfiles), "stash", "pop"])
             await log_cb("git pull failed — aborting.")
             return False
+
+        if something_stashed:
+            await log_cb("==> git stash pop")
+            await _stream(["git", "-C", str(dotfiles), "stash", "pop"])
 
         # Run the freshly-pulled update.sh non-interactively.
         # --no-pull skips its own git pull (we already did it above).
