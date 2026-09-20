@@ -300,7 +300,10 @@ class UpdateApplyScreen(ModalScreen[bool]):
 
 
 class SystemUpdatePanel(Vertical):
-    """Keyboard-navigable action list for system updates."""
+    """Auto-checks on mount; Ctrl+S opens the apply modal when updates are found."""
+
+    can_focus = True
+    BINDINGS = [Binding("r", "action_recheck", "Re-check")]
 
     def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -310,68 +313,57 @@ class SystemUpdatePanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
-        yield Static("", id="su-status")
-        with ListView(id="su-actions"):
-            yield ListItem(Label("↺  Check for updates"), id="su-item-check")
+        yield Static("Checking for updates…", id="su-status")
+        yield Label("", id="su-footer")
 
     def on_mount(self) -> None:
-        self.query_one("#su-actions").focus()
+        self.check_updates()
 
-    @on(ListView.Selected, "#su-actions")
-    def item_selected(self, event: ListView.Selected) -> None:
-        if self._running:
-            return
-        if event.item.id == "su-item-check":
+    def _on_show(self) -> None:
+        self.focus()
+
+    def _set_footer(self, text: str, style: str = "") -> None:
+        self.query_one("#su-footer", Label).update(Text(text, style=style))
+
+    def action_recheck(self) -> None:
+        if not self._running:
             self.check_updates()
-        elif event.item.id == "su-item-apply":
-            self._open_apply()
 
-    def _open_apply(self) -> None:
-        if self._last_status is None:
-            return
-        def done(succeeded: bool | None) -> None:
-            if succeeded:
-                self.check_updates()
-            else:
-                self.query_one("#su-actions").focus()
-        self.app.push_screen(UpdateApplyScreen(self.cfg, self._last_status), done)
+    def action_apply_update(self) -> None:
+        if self._last_status is not None and not self._running:
+            def done(succeeded: bool | None) -> None:
+                if succeeded:
+                    self.check_updates()
+                else:
+                    self.focus()
+            self.app.push_screen(UpdateApplyScreen(self.cfg, self._last_status), done)
 
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
-        lv = self.query_one("#su-actions", ListView)
+        self._last_status = None
         status_widget = self.query_one("#su-status", Static)
-
-        # update the check item label while running
-        check_label = self.query_one("#su-item-check Label", Label)
-        check_label.update("↺  Checking…")
-        status_widget.update("")
-
-        # remove apply item if present from a previous check
-        try:
-            self.query_one("#su-item-apply").remove()
-        except Exception:
-            pass
-
+        status_widget.update(Text("Checking for updates…", "dim"))
+        self._set_footer("")
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
             self._last_status = status
-
             if not status.is_git_repo:
                 status_widget.update(Text("Dotfiles repo not configured — run install.sh first.", "dim"))
+                self._set_footer("r to re-check")
             elif status.commits_behind:
                 summary = Text()
                 summary.append(f"{status.commits_behind} update(s) available:\n\n", "bold")
                 for c in status.commits[:8]:
                     summary.append(f"  {c}\n", "dim")
                 status_widget.update(summary)
-                await lv.mount(ListItem(Label("⬆  Apply updates"), id="su-item-apply"))
+                self._set_footer("Ctrl+S to apply · r to re-check")
             else:
-                status_widget.update(Text("✓  Up to date.", "green"))
+                status_widget.update(Text("✓ Up to date.", "green"))
+                self._set_footer("r to re-check")
         finally:
             self._running = False
-            check_label.update("↺  Re-check")
-            lv.focus()
+            self.focus()
 
 
 # ── nix packages panel ─────────────────────────────────────────────────────────
@@ -926,9 +918,7 @@ class NixStore(App):
     SystemUpdatePanel { height: 1fr; }
     #su-title { text-style: bold; margin-bottom: 1; }
     #su-status { height: auto; margin-bottom: 1; }
-    #su-actions { height: auto; border: none; background: transparent; padding: 0; }
-    #su-actions > ListItem { background: transparent; padding: 0 1; }
-    #su-actions > ListItem.--highlight { background: $primary-darken-2; }
+    #su-footer { color: $text-muted; }
 
     /* ── update apply modal ── */
     UpdateApplyScreen { align: center middle; }
@@ -1005,6 +995,9 @@ class NixStore(App):
         panel = self._active_panel()
         if panel is not None:
             panel.action_apply()
+            return
+        if self.query_one(ContentSwitcher).current == "panel-system":
+            self.query_one(SystemUpdatePanel).action_apply_update()
 
     def action_next_tab(self) -> None:
         panel = self._active_panel()
@@ -1014,7 +1007,8 @@ class NixStore(App):
     def action_back(self) -> None:
         panel = self._active_panel()
         if panel is None:
-            self.exit()
+            if self.query_one(ContentSwitcher).current != "panel-system":
+                self.exit()
             return
         if panel.clear_active_input():
             self.quit_armed = False
