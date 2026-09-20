@@ -307,12 +307,13 @@ class UpdateApplyScreen(ModalScreen[bool]):
             if ok:
                 self.succeeded = True
                 self._set_footer("✓ Done — Esc to close.", "bold green")
-                core.notify("System updated", "nix flake update + nixos-rebuild succeeded")
+                core.notify("System updated", "nixos-rebuild succeeded")
             else:
                 self._set_footer("✗ Update failed — see log above · Esc to close.", "bold red")
                 core.notify("System update failed", "", "critical")
         finally:
             self.running = False
+            self.set_focus(None)
 
 
 class SystemUpdatePanel(Vertical):
