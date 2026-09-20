@@ -27,7 +27,7 @@ from textual.widgets import (
 )
 
 from . import core
-from .core import Config, FlatpakPackage, Package
+from .core import Config, FlatpakPackage, Package, SystemUpdateStatus
 
 
 # ── shared widgets ─────────────────────────────────────────────────────────────
@@ -234,17 +234,27 @@ class UpdateApplyScreen(ModalScreen[bool]):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, cfg: Config, status_text: Text) -> None:
+    def __init__(self, cfg: Config, status: SystemUpdateStatus) -> None:
         super().__init__()
         self.cfg = cfg
-        self.status_text = status_text
+        self.status = status
         self.running = False
         self.succeeded = False
 
     def compose(self) -> ComposeResult:
+        info = Text()
+        if self.status.commits_behind:
+            info.append(f"{self.status.commits_behind} update(s) to apply:\n\n", "bold")
+            for c in self.status.commits[:8]:
+                info.append(f"  {c}\n", "dim")
+            info.append("\n")
+        info.append("Will run: ", "dim")
+        if self.status.is_git_repo:
+            info.append("git pull  →  ", "dim")
+        info.append("nix flake update  →  nixos-rebuild switch", "dim")
         with Vertical(id="dialog"):
             yield Label("Apply System Update", id="dialog-title")
-            yield Static(self.status_text, id="su-modal-status")
+            yield Static(info, id="su-modal-status")
             yield Input(password=True, placeholder="sudo password", id="su-modal-password")
             yield RichLog(id="su-modal-log", wrap=True, markup=False)
             yield Label("Enter sudo password and press Enter to apply.", id="su-modal-footer")
@@ -291,74 +301,66 @@ class UpdateApplyScreen(ModalScreen[bool]):
 
 
 class SystemUpdatePanel(Vertical):
-    """Shows update status; Enter opens UpdateApplyScreen modal."""
-
-    can_focus = True
-    BINDINGS = [
-        Binding("r", "action_recheck", "Re-check"),
-        Binding("enter", "action_apply_update", "Apply", show=False),
-    ]
+    """Check result panel; Apply updates button opens UpdateApplyScreen."""
 
     def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
         self.cfg = cfg
         self._running = False
-        self._status_text: Text | None = None
+        self._last_status: SystemUpdateStatus | None = None
 
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
-        yield Static("Checking…", id="su-status")
-        yield Label("", id="su-footer")
+        yield Static("", id="su-status")
+        with Horizontal(id="su-buttons"):
+            yield Button("Check for updates", id="su-check-btn", variant="primary")
+            yield Button("Apply updates", id="su-apply-btn", variant="success")
 
     def on_mount(self) -> None:
-        self.check_updates()
+        self.query_one("#su-status").display = False
+        self.query_one("#su-apply-btn").display = False
 
-    def _set_footer(self, text: str, style: str = "") -> None:
-        self.query_one("#su-footer", Label).update(Text(text, style=style))
-
-    def action_recheck(self) -> None:
+    @on(Button.Pressed, "#su-check-btn")
+    def check_btn_pressed(self) -> None:
         if not self._running:
-            self._status_text = None
-            self.query_one("#su-status", Static).update(Text("Checking…", "dim"))
-            self._set_footer("")
             self.check_updates()
 
-    def action_apply_update(self) -> None:
-        if self._status_text is not None and not self._running:
+    @on(Button.Pressed, "#su-apply-btn")
+    def apply_btn_pressed(self) -> None:
+        if not self._running and self._last_status is not None:
             def done(succeeded: bool | None) -> None:
                 if succeeded:
-                    self.action_recheck()
-                else:
-                    self.focus()
-            self.app.push_screen(UpdateApplyScreen(self.cfg, self._status_text), done)
+                    self.check_updates()
+            self.app.push_screen(UpdateApplyScreen(self.cfg, self._last_status), done)
 
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
+        check_btn = self.query_one("#su-check-btn", Button)
+        apply_btn = self.query_one("#su-apply-btn", Button)
+        check_btn.disabled = True
+        apply_btn.display = False
         status_widget = self.query_one("#su-status", Static)
-        status_widget.update(Text("Checking…", "dim"))
-        self._set_footer("")
+        status_widget.display = True
+        status_widget.update(Text("Checking for updates…", "dim"))
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
-            summary = Text()
-            if status.is_git_repo:
-                if status.commits_behind:
-                    summary.append(f"{status.commits_behind} new commit(s) on origin:\n\n", "bold")
-                    for c in status.commits[:8]:
-                        summary.append(f"  {c}\n", "dim")
-                    summary.append("\n")
-                else:
-                    summary.append("✓ Up to date.\n", "green")
-            summary.append("Will run: ", "dim")
-            if status.is_git_repo:
-                summary.append("git pull  →  ", "dim")
-            summary.append("nix flake update  →  nixos-rebuild switch", "dim")
-            status_widget.update(summary)
-            self._status_text = summary
-            self._set_footer("Press Enter to apply · r to re-check")
+            self._last_status = status
+            if not status.is_git_repo:
+                status_widget.update(Text("Dotfiles repo not found — run install.sh first.", "dim"))
+            elif status.commits_behind:
+                summary = Text()
+                summary.append(f"{status.commits_behind} update(s) available:\n\n", "bold")
+                for c in status.commits[:8]:
+                    summary.append(f"  {c}\n", "dim")
+                status_widget.update(summary)
+                apply_btn.display = True
+            else:
+                status_widget.update(Text("✓ Up to date.", "green"))
         finally:
             self._running = False
-            self.focus()
+            check_btn.disabled = False
+            check_btn.label = "Re-check"
 
 
 # ── nix packages panel ─────────────────────────────────────────────────────────
@@ -913,7 +915,10 @@ class NixStore(App):
     SystemUpdatePanel { height: 1fr; }
     #su-title { text-style: bold; margin-bottom: 1; }
     #su-status { height: auto; margin-bottom: 1; }
-    #su-footer { margin-top: 1; }
+    #su-buttons { height: auto; }
+    #su-check-btn, #su-apply-btn { width: auto; margin-right: 1; }
+    #su-check-btn:focus, #su-apply-btn:focus { border: tall $primary-lighten-1; }
+    #su-check-btn.-pressed, #su-apply-btn.-pressed { border: tall $primary-lighten-1; }
 
     /* ── update apply modal ── */
     UpdateApplyScreen { align: center middle; }
