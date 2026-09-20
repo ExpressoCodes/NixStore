@@ -352,14 +352,18 @@ class SystemUpdatePanel(Vertical):
                 self._set_footer("r to re-check")
             elif status.commits_behind:
                 summary = Text()
-                summary.append(f"{status.commits_behind} update(s) available:\n\n", "bold")
+                summary.append(f"{status.commits_behind} new dotfiles commit(s):\n\n", "bold")
                 for c in status.commits[:8]:
                     summary.append(f"  {c}\n", "dim")
+                summary.append("\nnix flake update will also run.", "dim")
                 status_widget.update(summary)
                 self._set_footer("Ctrl+S to apply · r to re-check")
             else:
-                status_widget.update(Text("✓ Up to date.", "green"))
-                self._set_footer("r to re-check")
+                summary = Text()
+                summary.append("✓ Dotfiles up to date.\n", "green")
+                summary.append("nix flake update will still run to pull latest nixpkgs.", "dim")
+                status_widget.update(summary)
+                self._set_footer("Ctrl+S to run nix flake update + rebuild · r to re-check")
         finally:
             self._running = False
             self.focus()
