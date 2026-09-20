@@ -229,7 +229,7 @@ class FlatpakApplyScreen(ModalScreen[bool]):
 # ── system update panel ────────────────────────────────────────────────────────
 
 class UpdateApplyScreen(ModalScreen[bool]):
-    """Modal that authenticates sudo and streams the system update."""
+    """Modal that streams the system update, asking for sudo password when needed."""
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
@@ -239,6 +239,7 @@ class UpdateApplyScreen(ModalScreen[bool]):
         self.status = status
         self.running = False
         self.succeeded = False
+        self._pw_future: asyncio.Future | None = None
 
     def compose(self) -> ComposeResult:
         info = Text()
@@ -254,13 +255,14 @@ class UpdateApplyScreen(ModalScreen[bool]):
         with Vertical(id="dialog"):
             yield Label("Apply System Update", id="dialog-title")
             yield Static(info, id="su-modal-status")
-            yield Input(password=True, placeholder="sudo password", id="su-modal-password")
             yield RichLog(id="su-modal-log", wrap=True, markup=False)
-            yield Label("Enter sudo password and press Enter to apply.", id="su-modal-footer")
+            yield Input(password=True, placeholder="sudo password", id="su-modal-password")
+            yield Label("", id="su-modal-footer")
 
     def on_mount(self) -> None:
-        self.query_one("#su-modal-log").display = False
-        self.query_one("#su-modal-password").focus()
+        self.query_one("#su-modal-password").display = False
+        self._set_footer("Starting…", "dim")
+        self.apply_updates()
 
     def _set_footer(self, text: str, style: str = "") -> None:
         self.query_one("#su-modal-footer", Label).update(Text(text, style=style))
@@ -269,25 +271,39 @@ class UpdateApplyScreen(ModalScreen[bool]):
         if not self.running:
             self.dismiss(self.succeeded)
 
+    async def _request_password(self, prompt: str) -> str:
+        """Show the password Input, wait for the user to submit it."""
+        self._pw_future = asyncio.get_running_loop().create_future()
+        pw = self.query_one("#su-modal-password", Input)
+        pw.display = True
+        self._set_footer("Enter sudo password and press Enter.")
+        pw.focus()
+        try:
+            return await self._pw_future
+        finally:
+            self._pw_future = None
+
     @on(Input.Submitted, "#su-modal-password")
     def password_submitted(self, event: Input.Submitted) -> None:
-        if not self.running:
-            password = event.value
-            event.input.value = ""
-            self.apply_updates(password)
+        password = event.value
+        event.input.value = ""
+        event.input.display = False
+        self._set_footer("Updating… (this can take a while)", "bold yellow")
+        if self._pw_future is not None and not self._pw_future.done():
+            self._pw_future.set_result(password)
 
     @work(exclusive=True)
-    async def apply_updates(self, password: str) -> None:
+    async def apply_updates(self) -> None:
         self.running = True
         log = self.query_one("#su-modal-log", RichLog)
-        self.query_one("#su-modal-password").display = False
-        log.display = True
         self._set_footer("Updating… (this can take a while)", "bold yellow")
         try:
             async def write_log(line: str) -> None:
                 log.write(Text.from_ansi(line))
 
-            ok = await core.run_system_update(self.cfg.flake, password, write_log)
+            ok = await core.run_system_update(
+                self.cfg.flake, write_log, self._request_password
+            )
             if ok:
                 self.succeeded = True
                 self._set_footer("✓ Done — Esc to close.", "bold green")

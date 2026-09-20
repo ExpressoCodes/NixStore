@@ -262,8 +262,12 @@ def check_system_updates(flake: Path) -> SystemUpdateStatus:
     return SystemUpdateStatus(is_git_repo=True, commits_behind=count, commits=commits)
 
 
-async def run_system_update(flake: Path, password: str, log_cb) -> bool:  # noqa: ANN001
-    """git-pull dotfiles (self-updating update.sh) then run it non-interactively."""
+async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # noqa: ANN001
+    """git-pull dotfiles (self-updating update.sh) then run it non-interactively.
+
+    password_cb: async (prompt: str) -> str, called when sudo needs a password.
+    When set, a SUDO_ASKPASS script bridges sudo's password request to this callback.
+    """
     vars_ = read_dotfiles_vars()
     dotfiles_str = vars_.get("DOTFILES_REPO")
     if not dotfiles_str:
@@ -275,48 +279,52 @@ async def run_system_update(flake: Path, password: str, log_cb) -> bool:  # noqa
         await log_cb(f"update.sh not found at {update_sh}")
         return False
 
-    # Authenticate sudo (creates / refreshes credential cache).
-    auth = await asyncio.create_subprocess_exec(
-        "sudo", "-Skp", "", "true",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    auth.stdin.write((password + "\n").encode())
-    await auth.stdin.drain()
-    auth.stdin.close()
-    del password
-    await auth.wait()
-    if auth.returncode != 0:
-        await log_cb("sudo: incorrect password.")
-        return False
-
-    # Keep sudo session alive during the long operation.
-    async def _keepalive() -> None:
-        while True:
-            await asyncio.sleep(50)
-            proc = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "true",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-
-    ka = asyncio.create_task(_keepalive())
-
-    async def _stream(cmd: list[str], env: dict | None = None) -> int:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        async for raw in proc.stdout:
-            await log_cb(raw.decode(errors="replace").rstrip("\n"))
-        await proc.wait()
-        return proc.returncode
-
+    import stat as _stat
+    tmpdir = tempfile.mkdtemp(prefix="nixstore-")
+    watcher: asyncio.Task | None = None
     try:
-        # Pull dotfiles — this self-updates update.sh before we run it.
+        env: dict = {**os.environ, "NIXSTORE_NONINTERACTIVE": "1"}
+
+        if password_cb is not None:
+            req_file = Path(tmpdir) / "sudo-req"
+            resp_file = Path(tmpdir) / "sudo-resp"
+            askpass = Path(tmpdir) / "askpass.sh"
+            askpass.write_text(
+                f"#!/bin/bash\n"
+                f"printf '%s' \"$1\" > {req_file}\n"
+                f"while [ ! -f {resp_file} ]; do sleep 0.05; done\n"
+                f"cat {resp_file}\n"
+                f"rm -f {resp_file}\n"
+            )
+            askpass.chmod(_stat.S_IRWXU)
+            env["SUDO_ASKPASS"] = str(askpass)
+
+            async def _watch_password() -> None:
+                while True:
+                    if req_file.exists():
+                        try:
+                            prompt = req_file.read_text().strip()
+                            req_file.unlink(missing_ok=True)
+                            password = await password_cb(prompt)
+                            resp_file.write_text(password + "\n")
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.1)
+
+            watcher = asyncio.create_task(_watch_password())
+
+        async def _stream(cmd: list[str], stream_env: dict | None = None) -> int:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, env=stream_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            async for raw in proc.stdout:
+                await log_cb(raw.decode(errors="replace").rstrip("\n"))
+            await proc.wait()
+            return proc.returncode
+
+        # Pull dotfiles — self-updates update.sh before we run it.
         await log_cb(f"==> git pull {dotfiles}")
         rc = await _stream(["git", "-C", str(dotfiles), "pull", "--ff-only"])
         if rc != 0:
@@ -326,11 +334,12 @@ async def run_system_update(flake: Path, password: str, log_cb) -> bool:  # noqa
         # Run the freshly-pulled update.sh non-interactively.
         # --no-pull skips its own git pull (we already did it above).
         await log_cb("==> Running update.sh")
-        env = {**os.environ, "NIXSTORE_NONINTERACTIVE": "1"}
-        rc = await _stream(["bash", str(update_sh), "--no-pull"], env=env)
+        rc = await _stream(["bash", str(update_sh), "--no-pull"], stream_env=env)
         return rc == 0
     finally:
-        ka.cancel()
+        if watcher is not None:
+            watcher.cancel()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # --- flatpak ------------------------------------------------------------------
