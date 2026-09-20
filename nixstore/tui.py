@@ -251,7 +251,7 @@ class UpdateApplyScreen(ModalScreen[bool]):
         info.append("Will run: ", "dim")
         if self.status.is_git_repo:
             info.append("git pull  →  ", "dim")
-        info.append("nix flake update  →  nixos-rebuild switch", "dim")
+        info.append("update.sh (dotfiles sync + nixos-rebuild switch)", "dim")
         with Vertical(id="dialog"):
             yield Label("Apply System Update", id="dialog-title")
             yield Static(info, id="su-modal-status")
@@ -358,7 +358,7 @@ class SystemUpdatePanel(Vertical):
         self._running = True
         self._last_status = None
         status_widget = self.query_one("#su-status", Static)
-        status_widget.update(Text("Checking for updates…", "dim"))
+        status_widget.update(Text("Checking for updates… (fetching flake inputs, may take a moment)", "dim"))
         self._set_footer("")
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
@@ -366,20 +366,26 @@ class SystemUpdatePanel(Vertical):
             if not status.is_git_repo:
                 status_widget.update(Text("Dotfiles repo not configured — run install.sh first.", "dim"))
                 self._set_footer("r to re-check")
-            elif status.commits_behind:
-                summary = Text()
+                return
+
+            if not status.has_updates:
+                status_widget.update(Text("✓ Up to date.", "green"))
+                self._set_footer("r to re-check")
+                return
+
+            summary = Text()
+            if status.commits_behind:
                 summary.append(f"{status.commits_behind} new dotfiles commit(s):\n\n", "bold")
                 for c in status.commits[:8]:
                     summary.append(f"  {c}\n", "dim")
-                summary.append("\nnix flake update will also run.", "dim")
-                status_widget.update(summary)
-                self._set_footer("Ctrl+S to apply · r to re-check")
-            else:
-                summary = Text()
-                summary.append("✓ Dotfiles up to date.\n", "green")
-                summary.append("nix flake update will still run to pull latest nixpkgs.", "dim")
-                status_widget.update(summary)
-                self._set_footer("Ctrl+S to run nix flake update + rebuild · r to re-check")
+                if status.flake_inputs_updated:
+                    summary.append("\n")
+            if status.flake_inputs_updated:
+                summary.append(f"{len(status.flake_inputs_updated)} package input(s) updated:\n\n", "bold")
+                for inp in status.flake_inputs_updated:
+                    summary.append(f"  {inp}\n", "dim")
+            status_widget.update(summary)
+            self._set_footer("u to apply · r to re-check")
         finally:
             self._running = False
             self.focus()
@@ -977,6 +983,7 @@ class NixStore(App):
         Binding("ctrl+s", "apply", "Apply changes"),
         Binding("escape", "back", "Clear / quit"),
         Binding("r", "recheck_updates", "Re-check", show=False),
+        Binding("u", "apply_system_update", "Apply update", show=False),
     ]
 
     def __init__(self, cfg: Config, query: str = "") -> None:
@@ -1017,7 +1024,8 @@ class NixStore(App):
         panel = self._active_panel()
         if panel is not None:
             panel.action_apply()
-            return
+
+    def action_apply_system_update(self) -> None:
         if self.query_one(ContentSwitcher).current == "panel-system":
             self.query_one(SystemUpdatePanel).action_apply_update()
 
