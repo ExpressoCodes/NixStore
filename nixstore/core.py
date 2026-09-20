@@ -427,11 +427,15 @@ async def ensure_flathub() -> None:
 
 def _parse_flatpak_lines(output: str) -> list[FlatpakPackage]:
     results = []
+    seen: set[str] = set()
     for line in output.splitlines():
         parts = line.split("\t")
         app_id = parts[0].strip() if parts else ""
         if not app_id or app_id in ("Application ID", "Name"):
             continue
+        if app_id in seen:
+            continue
+        seen.add(app_id)
         results.append(FlatpakPackage(
             app_id=app_id,
             name=parts[1].strip() if len(parts) > 1 else "",
