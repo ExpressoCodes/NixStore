@@ -11,6 +11,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
+    Button,
     ContentSwitcher,
     DataTable,
     Footer,
@@ -229,59 +230,69 @@ class FlatpakApplyScreen(ModalScreen[bool]):
 # ── system update panel ────────────────────────────────────────────────────────
 
 class SystemUpdatePanel(Vertical):
-    """Full-panel system update view (replaces the old UpdateScreen modal)."""
+    """Full-panel system update view."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._running = False
-        self._checked = False
         self._repo = None
 
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
+        yield Button("Check for updates", id="su-check-btn", variant="primary")
         yield Static("", id="su-status")
         yield Input(password=True, placeholder="sudo password (needed for nixos-rebuild)", id="su-password")
         yield RichLog(id="su-log", wrap=True, markup=False)
         yield Label("", id="su-footer")
 
-    def on_show(self) -> None:
-        if not self._checked and not self._running:
-            self._checked = True
-            self.check_updates()
+    def on_mount(self) -> None:
+        self.query_one("#su-status").display = False
+        self.query_one("#su-password").display = False
+        self.query_one("#su-log").display = False
 
     def _set_footer(self, text: str, style: str = "") -> None:
         self.query_one("#su-footer", Label).update(Text(text, style=style))
 
+    @on(Button.Pressed, "#su-check-btn")
+    def check_btn_pressed(self) -> None:
+        if not self._running:
+            self.check_updates()
+
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
+        self._repo = None
+        btn = self.query_one("#su-check-btn", Button)
+        btn.disabled = True
+        status_widget = self.query_one("#su-status", Static)
+        status_widget.display = True
         self.query_one("#su-password").display = False
         self.query_one("#su-log").display = False
-        self.query_one("#su-status", Static).update(Text("Checking for updates…", "dim"))
+        status_widget.update(Text("Checking for updates…", "dim"))
+        self._set_footer("")
         try:
             status = await asyncio.to_thread(core.check_dotfiles_updates)
             if status is None:
-                self.query_one("#su-status", Static).update(
-                    Text("Dotfiles repo not found.\nRun install.sh first.", "dim"))
+                status_widget.update(Text("Dotfiles repo not found. Run install.sh first.", "dim"))
                 self._set_footer("No update source configured.")
                 return
             if status.up_to_date:
-                self.query_one("#su-status", Static).update(
-                    Text("✓ Already up to date.", "bold green"))
-                self._set_footer("Nothing to do.")
+                status_widget.update(Text("✓ Already up to date.", "bold green"))
+                self._set_footer("Run again to re-check.")
                 return
             summary = Text()
             summary.append(f"{status.count} update(s) available:\n\n", "bold")
             for c in status.commits[:8]:
                 summary.append(f"  {c}\n", "dim")
-            self.query_one("#su-status", Static).update(summary)
+            status_widget.update(summary)
             self._repo = status.repo
             pw = self.query_one("#su-password")
             pw.display = True
             pw.focus()
-            self._set_footer("Enter sudo password to apply · Esc to cancel")
+            self._set_footer("Enter sudo password to apply.")
         finally:
             self._running = False
+            btn.disabled = False
 
     @on(Input.Submitted, "#su-password")
     def password_submitted(self, event: Input.Submitted) -> None:
@@ -801,8 +812,8 @@ class FlatpakPackagesPanel(Vertical):
 
 # ── sidebar ────────────────────────────────────────────────────────────────────
 
-_NAV_PANELS = ["panel-system", "panel-nix", "panel-flatpak"]
-_NAV_LABELS = ["⟳  System Update", "  Nix Packages", "  Flatpaks"]
+_NAV_PANELS = ["panel-nix", "panel-flatpak", "panel-system"]
+_NAV_LABELS = ["  Nix Packages", "  Flatpaks", "⟳  System Update"]
 
 
 class Sidebar(Vertical):
@@ -862,6 +873,7 @@ class NixStore(App):
     /* ── system update panel ── */
     #panel-system { padding: 1 2; }
     #su-title { text-style: bold; margin-bottom: 1; }
+    #su-check-btn { margin-bottom: 1; width: auto; }
     #su-status { height: auto; margin-bottom: 1; }
     #su-password { margin-bottom: 1; }
     #su-log { height: 1fr; border: round $primary-darken-2; }
@@ -920,8 +932,8 @@ class NixStore(App):
             nix = self.query_one(NixPackagesPanel)
             nix.query_one("#nix-search-input", Input).value = self.initial_query
         self.query_one(NixPackagesPanel).query_one("#nix-search-input").focus()
-        # select the Nix Packages item in the sidebar
-        self.query_one("#nav", ListView).index = 1
+        # select the Nix Packages item in the sidebar (index 0)
+        self.query_one("#nav", ListView).index = 0
 
     def _active_panel(self) -> NixPackagesPanel | FlatpakPackagesPanel | None:
         current = self.query_one(ContentSwitcher).current
