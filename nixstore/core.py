@@ -267,7 +267,7 @@ def check_dotfiles_updates() -> DotfilesStatus | None:
                           count=count, commits=commits)
 
 
-async def run_dotfiles_update(repo: Path, password: str, log_cb) -> bool:
+async def run_dotfiles_update(repo: Path, password: str, log_cb) -> bool:  # noqa: ANN001
     """Run update.sh with the given sudo password, streaming output to log_cb."""
     script = repo / "update.sh"
     if not script.exists():
@@ -285,5 +285,96 @@ async def run_dotfiles_update(repo: Path, password: str, log_cb) -> bool:
     del password
     async for raw in proc.stdout:
         await log_cb(raw.decode(errors="replace").rstrip("\n"))
+    await proc.wait()
+    return proc.returncode == 0
+
+
+# --- flatpak ------------------------------------------------------------------
+
+
+class FlatpakPackage:
+    __slots__ = ("app_id", "description", "lower", "name", "version")
+
+    def __init__(self, app_id: str, name: str = "", version: str = "", description: str = "") -> None:
+        self.app_id = app_id
+        self.name = name or app_id
+        self.version = version
+        self.description = description
+        self.lower = f"{app_id} {name} {description}".lower()
+
+    def __repr__(self) -> str:
+        return f"FlatpakPackage({self.app_id!r})"
+
+
+async def ensure_flathub() -> None:
+    """Add the flathub remote (user-level) if not already present."""
+    proc = await asyncio.create_subprocess_exec(
+        "flatpak", "remote-add", "--if-not-exists", "--user",
+        "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
+def _parse_flatpak_lines(output: str) -> list[FlatpakPackage]:
+    results = []
+    for line in output.splitlines():
+        parts = line.split("\t")
+        app_id = parts[0].strip() if parts else ""
+        if not app_id or app_id in ("Application ID", "Name"):
+            continue
+        results.append(FlatpakPackage(
+            app_id=app_id,
+            name=parts[1].strip() if len(parts) > 1 else "",
+            version=parts[2].strip() if len(parts) > 2 else "",
+            description=parts[3].strip() if len(parts) > 3 else "",
+        ))
+    return results
+
+
+async def search_flatpaks(query: str) -> list[FlatpakPackage]:
+    if not query.strip():
+        return []
+    proc = await asyncio.create_subprocess_exec(
+        "flatpak", "search", "--columns=application,name,version,description", query,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return _parse_flatpak_lines(out.decode(errors="replace"))
+
+
+async def list_flatpaks() -> list[FlatpakPackage]:
+    proc = await asyncio.create_subprocess_exec(
+        "flatpak", "list", "--app", "--user",
+        "--columns=application,name,version,description",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return _parse_flatpak_lines(out.decode(errors="replace"))
+
+
+async def install_flatpak(app_id: str, log_cb) -> bool:  # noqa: ANN001
+    proc = await asyncio.create_subprocess_exec(
+        "flatpak", "install", "-y", "--user", "flathub", app_id,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    async for raw in proc.stdout:
+        log_cb(raw.decode(errors="replace").rstrip("\n"))
+    await proc.wait()
+    return proc.returncode == 0
+
+
+async def remove_flatpak(app_id: str, log_cb) -> bool:  # noqa: ANN001
+    proc = await asyncio.create_subprocess_exec(
+        "flatpak", "remove", "-y", "--user", app_id,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    async for raw in proc.stdout:
+        log_cb(raw.decode(errors="replace").rstrip("\n"))
     await proc.wait()
     return proc.returncode == 0
