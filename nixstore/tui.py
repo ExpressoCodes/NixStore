@@ -566,6 +566,7 @@ class FlatpakPackagesPanel(Vertical):
         self.installed: list[FlatpakPackage] = []
         self.installed_ids: set[str] = set()
         self.pending: dict[str, str] = {}
+        self._flatpak_available = True
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="fp-tabs"):
@@ -590,9 +591,22 @@ class FlatpakPackagesPanel(Vertical):
 
     @work(exclusive=True, group="fp-init")
     async def _init_flatpak(self) -> None:
+        import shutil
+        if not shutil.which("flatpak"):
+            self._flatpak_available = False
+            self._show_msg(
+                "flatpak is not installed. Add it to your NixOS configuration to use this panel.",
+                "bold yellow",
+            )
+            return
         self._show_msg("Initialising Flatpak (adding Flathub remote if needed)…")
-        await core.ensure_flathub()
-        pkgs = await core.list_flatpaks()
+        try:
+            await core.ensure_flathub()
+            pkgs = await core.list_flatpaks()
+        except FileNotFoundError:
+            self._flatpak_available = False
+            self._show_msg("flatpak not found. Install it via NixOS to use this panel.", "bold yellow")
+            return
         self.installed = pkgs
         self.installed_ids = {p.app_id for p in pkgs}
         self.refresh_installed_tab()
@@ -627,6 +641,8 @@ class FlatpakPackagesPanel(Vertical):
     @work(exclusive=True, group="fp-search")
     async def run_search(self, query: str) -> None:
         await asyncio.sleep(0.15)
+        if not self._flatpak_available:
+            return
         if not query.strip():
             self._show_msg("Type to search Flatpak apps.")
             return
@@ -634,6 +650,9 @@ class FlatpakPackagesPanel(Vertical):
         table.loading = True
         try:
             results = await core.search_flatpaks(query)
+        except FileNotFoundError:
+            self._show_msg("flatpak not found.", "bold yellow")
+            return
         finally:
             table.loading = False
         self._fill_table(table, results)
@@ -759,6 +778,9 @@ class FlatpakPackagesPanel(Vertical):
         self._show_details(self.active_table())
 
     def action_apply(self) -> None:
+        if not self._flatpak_available:
+            self.notify("Flatpak is not installed on this system.", severity="warning")
+            return
         if not self.pending:
             self.notify("Nothing to apply — mark apps with Enter first.")
             return
