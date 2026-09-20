@@ -303,7 +303,6 @@ class SystemUpdatePanel(Vertical):
     """Auto-checks on mount; Ctrl+S opens the apply modal when updates are found."""
 
     can_focus = True
-    BINDINGS = [Binding("r", "action_recheck", "Re-check")]
 
     def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -955,6 +954,7 @@ class NixStore(App):
         Binding("tab", "next_tab", "Switch tab", priority=True),
         Binding("ctrl+s", "apply", "Apply changes"),
         Binding("escape", "back", "Clear / quit"),
+        Binding("r", "recheck_updates", "Re-check", show=False),
     ]
 
     def __init__(self, cfg: Config, query: str = "") -> None:
@@ -998,6 +998,10 @@ class NixStore(App):
             return
         if self.query_one(ContentSwitcher).current == "panel-system":
             self.query_one(SystemUpdatePanel).action_apply_update()
+
+    def action_recheck_updates(self) -> None:
+        if self.query_one(ContentSwitcher).current == "panel-system":
+            self.query_one(SystemUpdatePanel).action_recheck()
 
     def action_next_tab(self) -> None:
         panel = self._active_panel()
