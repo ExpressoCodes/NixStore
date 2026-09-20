@@ -232,6 +232,9 @@ class FlatpakApplyScreen(ModalScreen[bool]):
 class SystemUpdatePanel(Vertical):
     """Full-panel system update view — self-contained, no external scripts needed."""
 
+    can_focus = True
+    BINDINGS = [Binding("r", "action_recheck", "Re-check")]
+
     def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
         self.cfg = cfg
@@ -239,35 +242,34 @@ class SystemUpdatePanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
-        yield Button("Check for updates", id="su-check-btn", variant="primary")
-        yield Static("", id="su-status")
+        yield Static("Checking…", id="su-status")
         yield Input(password=True, placeholder="sudo password (needed for nixos-rebuild)", id="su-password")
         yield RichLog(id="su-log", wrap=True, markup=False)
         yield Label("", id="su-footer")
 
     def on_mount(self) -> None:
-        self.query_one("#su-status").display = False
         self.query_one("#su-password").display = False
         self.query_one("#su-log").display = False
+        self.check_updates()
 
     def _set_footer(self, text: str, style: str = "") -> None:
         self.query_one("#su-footer", Label).update(Text(text, style=style))
 
-    @on(Button.Pressed, "#su-check-btn")
-    def check_btn_pressed(self) -> None:
+    def action_recheck(self) -> None:
         if not self._running:
+            self.query_one("#su-log").display = False
+            self.query_one("#su-password").display = False
+            self.query_one("#su-status", Static).update(Text("Checking…", "dim"))
+            self._set_footer("")
             self.check_updates()
 
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
-        btn = self.query_one("#su-check-btn", Button)
-        btn.disabled = True
         status_widget = self.query_one("#su-status", Static)
-        status_widget.display = True
+        status_widget.update(Text("Checking…", "dim"))
         self.query_one("#su-password").display = False
         self.query_one("#su-log").display = False
-        status_widget.update(Text("Checking…", "dim"))
         self._set_footer("")
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
@@ -279,7 +281,7 @@ class SystemUpdatePanel(Vertical):
                         summary.append(f"  {c}\n", "dim")
                     summary.append("\n")
                 else:
-                    summary.append("✓ Git repo is up to date.\n", "green")
+                    summary.append("✓ Up to date.\n", "green")
             summary.append("Will run: ", "dim")
             if status.is_git_repo:
                 summary.append("git pull  →  ", "dim")
@@ -291,7 +293,7 @@ class SystemUpdatePanel(Vertical):
             self._set_footer("Enter sudo password and press Enter to apply.")
         finally:
             self._running = False
-            btn.disabled = False
+            self.focus()
 
     @on(Input.Submitted, "#su-password")
     def password_submitted(self, event: Input.Submitted) -> None:
@@ -313,13 +315,14 @@ class SystemUpdatePanel(Vertical):
 
             ok = await core.run_system_update(self.cfg.flake, password, write_log)
             if ok:
-                self._set_footer("✓ Done.", "bold green")
+                self._set_footer("✓ Done. Press r to re-check.", "bold green")
                 core.notify("System updated", "nix flake update + nixos-rebuild succeeded")
             else:
-                self._set_footer("✗ Update failed — see log above.", "bold red")
+                self._set_footer("✗ Update failed — see log above. Press r to re-check.", "bold red")
                 core.notify("System update failed", "", "critical")
         finally:
             self._running = False
+            self.focus()
 
 
 # ── nix packages panel ─────────────────────────────────────────────────────────
@@ -871,8 +874,8 @@ class NixStore(App):
 
     /* ── system update panel ── */
     #panel-system { padding: 1 2; }
+    SystemUpdatePanel { height: 1fr; }
     #su-title { text-style: bold; margin-bottom: 1; }
-    #su-check-btn { margin-bottom: 1; width: auto; }
     #su-status { height: auto; margin-bottom: 1; }
     #su-password { margin-bottom: 1; }
     #su-log { height: 1fr; border: round $primary-darken-2; }
