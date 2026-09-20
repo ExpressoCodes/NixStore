@@ -879,6 +879,8 @@ class Sidebar(Vertical):
             panel = app.query_one(f"#{panel_id}")
             if hasattr(panel, "active_input"):
                 panel.active_input().focus()
+            elif panel.can_focus:
+                panel.focus()
         except Exception:  # noqa: BLE001
             pass
 
