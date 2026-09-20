@@ -371,6 +371,7 @@ async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # n
         async def _stream(cmd: list[str], stream_env: dict | None = None) -> int:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, env=stream_env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
