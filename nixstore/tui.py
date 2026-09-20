@@ -11,7 +11,6 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button,
     ContentSwitcher,
     DataTable,
     Footer,
@@ -301,7 +300,7 @@ class UpdateApplyScreen(ModalScreen[bool]):
 
 
 class SystemUpdatePanel(Vertical):
-    """Check result panel; Apply updates button opens UpdateApplyScreen."""
+    """Keyboard-navigable action list for system updates."""
 
     def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -312,55 +311,67 @@ class SystemUpdatePanel(Vertical):
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
         yield Static("", id="su-status")
-        with Horizontal(id="su-buttons"):
-            yield Button("Check for updates", id="su-check-btn", variant="primary")
-            yield Button("Apply updates", id="su-apply-btn", variant="success")
+        with ListView(id="su-actions"):
+            yield ListItem(Label("↺  Check for updates"), id="su-item-check")
 
     def on_mount(self) -> None:
-        self.query_one("#su-status").display = False
-        self.query_one("#su-apply-btn").display = False
+        self.query_one("#su-actions").focus()
 
-    @on(Button.Pressed, "#su-check-btn")
-    def check_btn_pressed(self) -> None:
-        if not self._running:
+    @on(ListView.Selected, "#su-actions")
+    def item_selected(self, event: ListView.Selected) -> None:
+        if self._running:
+            return
+        if event.item.id == "su-item-check":
             self.check_updates()
+        elif event.item.id == "su-item-apply":
+            self._open_apply()
 
-    @on(Button.Pressed, "#su-apply-btn")
-    def apply_btn_pressed(self) -> None:
-        if not self._running and self._last_status is not None:
-            def done(succeeded: bool | None) -> None:
-                if succeeded:
-                    self.check_updates()
-            self.app.push_screen(UpdateApplyScreen(self.cfg, self._last_status), done)
+    def _open_apply(self) -> None:
+        if self._last_status is None:
+            return
+        def done(succeeded: bool | None) -> None:
+            if succeeded:
+                self.check_updates()
+            else:
+                self.query_one("#su-actions").focus()
+        self.app.push_screen(UpdateApplyScreen(self.cfg, self._last_status), done)
 
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
-        check_btn = self.query_one("#su-check-btn", Button)
-        apply_btn = self.query_one("#su-apply-btn", Button)
-        check_btn.disabled = True
-        apply_btn.display = False
+        lv = self.query_one("#su-actions", ListView)
         status_widget = self.query_one("#su-status", Static)
-        status_widget.display = True
-        status_widget.update(Text("Checking for updates…", "dim"))
+
+        # update the check item label while running
+        check_label = self.query_one("#su-item-check Label", Label)
+        check_label.update("↺  Checking…")
+        status_widget.update("")
+
+        # remove apply item if present from a previous check
+        try:
+            self.query_one("#su-item-apply").remove()
+        except Exception:
+            pass
+
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
             self._last_status = status
+
             if not status.is_git_repo:
-                status_widget.update(Text("Dotfiles repo not found — run install.sh first.", "dim"))
+                status_widget.update(Text("Dotfiles repo not configured — run install.sh first.", "dim"))
             elif status.commits_behind:
                 summary = Text()
                 summary.append(f"{status.commits_behind} update(s) available:\n\n", "bold")
                 for c in status.commits[:8]:
                     summary.append(f"  {c}\n", "dim")
                 status_widget.update(summary)
-                apply_btn.display = True
+                await lv.mount(ListItem(Label("⬆  Apply updates"), id="su-item-apply"))
             else:
-                status_widget.update(Text("✓ Up to date.", "green"))
+                status_widget.update(Text("✓  Up to date.", "green"))
         finally:
             self._running = False
-            check_btn.disabled = False
-            check_btn.label = "Re-check"
+            check_label.update("↺  Re-check")
+            lv.focus()
 
 
 # ── nix packages panel ─────────────────────────────────────────────────────────
@@ -915,10 +926,9 @@ class NixStore(App):
     SystemUpdatePanel { height: 1fr; }
     #su-title { text-style: bold; margin-bottom: 1; }
     #su-status { height: auto; margin-bottom: 1; }
-    #su-buttons { height: auto; }
-    #su-check-btn, #su-apply-btn { width: auto; margin-right: 1; }
-    #su-check-btn:focus, #su-apply-btn:focus { border: tall $primary-lighten-1; }
-    #su-check-btn.-pressed, #su-apply-btn.-pressed { border: tall $primary-lighten-1; }
+    #su-actions { height: auto; border: none; background: transparent; padding: 0; }
+    #su-actions > ListItem { background: transparent; padding: 0 1; }
+    #su-actions > ListItem.--highlight { background: $primary-darken-2; }
 
     /* ── update apply modal ── */
     UpdateApplyScreen { align: center middle; }
