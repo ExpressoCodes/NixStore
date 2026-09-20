@@ -207,51 +207,44 @@ def notify(summary: str, body: str, urgency: str = "normal") -> None:
         pass
 
 
-# --- dotfiles update helpers --------------------------------------------------
+# --- system update helpers ----------------------------------------------------
 
 import shutil
 
-VARS_FILE = Path("/etc/nixos/.dotfiles-vars")
-
-
-def read_dotfiles_vars() -> dict[str, str]:
-    """Parse /etc/nixos/.dotfiles-vars written by the dotfiles install.sh."""
-    if not VARS_FILE.exists():
-        return {}
-    result = {}
-    for line in VARS_FILE.read_text().splitlines():
-        if "=" in line and not line.startswith("#"):
-            k, _, v = line.partition("=")
-            result[k.strip()] = v.strip()
-    return result
+UPDATE_SCRIPT = """
+set -e
+FLAKE="$1"
+cd "$FLAKE"
+if [ -d .git ]; then
+  echo "==> git pull"
+  git pull --ff-only
+fi
+echo "==> nix flake update"
+nix flake update
+echo "==> nixos-rebuild switch"
+nixos-rebuild switch --flake "$FLAKE"
+"""
 
 
 @dataclass(frozen=True)
-class DotfilesStatus:
-    repo: Path
-    local_rev: str
-    remote_rev: str
-    count: int
-    commits: list[str]  # one-line summaries, newest first
+class SystemUpdateStatus:
+    is_git_repo: bool
+    commits_behind: int
+    commits: list[str]  # one-line summaries of unpulled commits
 
     @property
-    def up_to_date(self) -> bool:
-        return self.local_rev == self.remote_rev
+    def git_up_to_date(self) -> bool:
+        return not self.is_git_repo or self.commits_behind == 0
 
 
-def check_dotfiles_updates() -> DotfilesStatus | None:
-    """Fetch origin and return status, or None if repo/network unavailable."""
-    vars_ = read_dotfiles_vars()
-    repo_str = vars_.get("DOTFILES_REPO")
-    if not repo_str:
-        return None
-    repo = Path(repo_str)
-    if not (repo / ".git").exists():
-        return None
+def check_system_updates(flake: Path) -> SystemUpdateStatus:
+    """If the flake dir is a git repo, fetch origin and report pending commits."""
+    if not (flake / ".git").exists():
+        return SystemUpdateStatus(is_git_repo=False, commits_behind=0, commits=[])
     git = shutil.which("git") or "git"
 
     def run(*args: str) -> str:
-        r = subprocess.run([git, "-C", str(repo), *args], capture_output=True, text=True)
+        r = subprocess.run([git, "-C", str(flake), *args], capture_output=True, text=True)
         return r.stdout.strip() if r.returncode == 0 else ""
 
     run("fetch", "--quiet", "origin")
@@ -259,22 +252,17 @@ def check_dotfiles_updates() -> DotfilesStatus | None:
     remote = (run("rev-parse", "origin/HEAD")
               or run("rev-parse", "origin/main")
               or run("rev-parse", "origin/master"))
-    if not local or not remote:
-        return None
+    if not local or not remote or local == remote:
+        return SystemUpdateStatus(is_git_repo=True, commits_behind=0, commits=[])
     count = int(run("rev-list", "--count", f"HEAD..{remote}") or "0")
     commits = [c for c in run("log", "--oneline", f"HEAD..{remote}").splitlines() if c]
-    return DotfilesStatus(repo=repo, local_rev=local, remote_rev=remote,
-                          count=count, commits=commits)
+    return SystemUpdateStatus(is_git_repo=True, commits_behind=count, commits=commits)
 
 
-async def run_dotfiles_update(repo: Path, password: str, log_cb) -> bool:  # noqa: ANN001
-    """Run update.sh with the given sudo password, streaming output to log_cb."""
-    script = repo / "update.sh"
-    if not script.exists():
-        await log_cb(f"update.sh not found in {repo}")
-        return False
+async def run_system_update(flake: Path, password: str, log_cb) -> bool:  # noqa: ANN001
+    """git pull (if git repo) → nix flake update → nixos-rebuild switch, streamed."""
     proc = await asyncio.create_subprocess_exec(
-        "sudo", "-S", "-k", "-p", "", str(script),
+        "sudo", "-S", "-k", "-p", "", "sh", "-c", UPDATE_SCRIPT, "nixstore", str(flake),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

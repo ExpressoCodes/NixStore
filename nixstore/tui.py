@@ -230,12 +230,12 @@ class FlatpakApplyScreen(ModalScreen[bool]):
 # ── system update panel ────────────────────────────────────────────────────────
 
 class SystemUpdatePanel(Vertical):
-    """Full-panel system update view."""
+    """Full-panel system update view — self-contained, no external scripts needed."""
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, cfg: Config, **kwargs) -> None:
         super().__init__(**kwargs)
+        self.cfg = cfg
         self._running = False
-        self._repo = None
 
     def compose(self) -> ComposeResult:
         yield Label("System Update", id="su-title")
@@ -261,35 +261,34 @@ class SystemUpdatePanel(Vertical):
     @work(exclusive=True, group="su-check")
     async def check_updates(self) -> None:
         self._running = True
-        self._repo = None
         btn = self.query_one("#su-check-btn", Button)
         btn.disabled = True
         status_widget = self.query_one("#su-status", Static)
         status_widget.display = True
         self.query_one("#su-password").display = False
         self.query_one("#su-log").display = False
-        status_widget.update(Text("Checking for updates…", "dim"))
+        status_widget.update(Text("Checking…", "dim"))
         self._set_footer("")
         try:
-            status = await asyncio.to_thread(core.check_dotfiles_updates)
-            if status is None:
-                status_widget.update(Text("Dotfiles repo not found. Run install.sh first.", "dim"))
-                self._set_footer("No update source configured.")
-                return
-            if status.up_to_date:
-                status_widget.update(Text("✓ Already up to date.", "bold green"))
-                self._set_footer("Run again to re-check.")
-                return
+            status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
             summary = Text()
-            summary.append(f"{status.count} update(s) available:\n\n", "bold")
-            for c in status.commits[:8]:
-                summary.append(f"  {c}\n", "dim")
+            if status.is_git_repo:
+                if status.commits_behind:
+                    summary.append(f"{status.commits_behind} new commit(s) on origin:\n\n", "bold")
+                    for c in status.commits[:8]:
+                        summary.append(f"  {c}\n", "dim")
+                    summary.append("\n")
+                else:
+                    summary.append("✓ Git repo is up to date.\n", "green")
+            summary.append("Will run: ", "dim")
+            if status.is_git_repo:
+                summary.append("git pull  →  ", "dim")
+            summary.append("nix flake update  →  nixos-rebuild switch", "dim")
             status_widget.update(summary)
-            self._repo = status.repo
             pw = self.query_one("#su-password")
             pw.display = True
             pw.focus()
-            self._set_footer("Enter sudo password to apply.")
+            self._set_footer("Enter sudo password and press Enter to apply.")
         finally:
             self._running = False
             btn.disabled = False
@@ -309,16 +308,16 @@ class SystemUpdatePanel(Vertical):
         log.display = True
         self._set_footer("Updating… (this can take a while)", "bold yellow")
         try:
-            async def write_log(line: str) -> None:
+            def write_log(line: str) -> None:
                 log.write(Text.from_ansi(line))
 
-            ok = await core.run_dotfiles_update(self._repo, password, write_log)
+            ok = await core.run_system_update(self.cfg.flake, password, write_log)
             if ok:
                 self._set_footer("✓ Done.", "bold green")
-                core.notify("Dotfiles updated", "System config is up to date")
+                core.notify("System updated", "nix flake update + nixos-rebuild succeeded")
             else:
                 self._set_footer("✗ Update failed — see log above.", "bold red")
-                core.notify("Dotfiles update failed", "", "critical")
+                core.notify("System update failed", "", "critical")
         finally:
             self._running = False
 
@@ -921,7 +920,7 @@ class NixStore(App):
         with Horizontal(id="main-row"):
             yield Sidebar()
             with ContentSwitcher(initial="panel-nix"):
-                yield SystemUpdatePanel(id="panel-system")
+                yield SystemUpdatePanel(cfg=self.cfg, id="panel-system")
                 yield NixPackagesPanel(id="panel-nix", cfg=self.cfg)
                 yield FlatpakPackagesPanel(id="panel-flatpak")
         yield Footer()
