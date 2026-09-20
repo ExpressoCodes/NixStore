@@ -290,7 +290,7 @@ async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # n
             resp_file = Path(tmpdir) / "sudo-resp"
             askpass = Path(tmpdir) / "askpass.sh"
             askpass.write_text(
-                f"#!/bin/bash\n"
+                f"#!/bin/sh\n"
                 f"printf '%s' \"$1\" > {req_file}\n"
                 f"while [ ! -f {resp_file} ]; do sleep 0.05; done\n"
                 f"cat {resp_file}\n"
