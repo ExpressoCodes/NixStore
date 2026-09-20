@@ -310,7 +310,7 @@ class SystemUpdatePanel(Vertical):
         log.display = True
         self._set_footer("Updating… (this can take a while)", "bold yellow")
         try:
-            def write_log(line: str) -> None:
+            async def write_log(line: str) -> None:
                 log.write(Text.from_ansi(line))
 
             ok = await core.run_system_update(self.cfg.flake, password, write_log)
