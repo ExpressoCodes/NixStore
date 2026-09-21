@@ -176,7 +176,7 @@ def cmd_module_add(cfg: Config, args: argparse.Namespace) -> int:
         name = core.add_flake_module(
             url=args.url,
             modules_path=cfg.modules_file,
-            inputs_file_path=cfg.inputs_file,
+            flake_file_path=cfg.flake_file,
             flake_dir=cfg.flake,
             name=args.name,
             progress_callback=_print_line,
@@ -193,7 +193,7 @@ def cmd_module_add(cfg: Config, args: argparse.Namespace) -> int:
 
 def cmd_module_remove(cfg: Config, args: argparse.Namespace) -> int:
     try:
-        core.remove_module(args.name, cfg.modules_file, cfg.inputs_file)
+        core.remove_module(args.name, cfg.modules_file, cfg.flake_file)
         print(f"{GREEN}✓{RESET} Module '{args.name}' removed from registry.")
         print(f"{YELLOW}!{RESET} Run 'sudo nixos-rebuild switch --flake {cfg.flake}' to apply.")
         return 0

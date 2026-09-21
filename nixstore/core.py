@@ -40,21 +40,21 @@ class Config:
     packages_file: Path
     cache_dir: Path
     modules_file: Path = field(default=None)  # type: ignore[assignment]
-    inputs_file: Path = field(default=None)  # type: ignore[assignment]
+    flake_file: Path = field(default=None)  # type: ignore[assignment]
 
     @classmethod
     def from_env(cls, flake: str | None = None) -> Config:
         flake_dir = Path(flake or os.environ.get("NIXSTORE_FLAKE", "/etc/nixos"))
         packages_file = os.environ.get("NIXSTORE_PACKAGES_FILE") if flake is None else None
         modules_file = os.environ.get("NIXSTORE_MODULES_FILE") if flake is None else None
-        inputs_file = os.environ.get("NIXSTORE_INPUTS_FILE") if flake is None else None
+        flake_file = os.environ.get("NIXSTORE_FLAKE_FILE") if flake is None else None
         cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
         return cls(
             flake=flake_dir,
             packages_file=Path(packages_file) if packages_file else flake_dir / "packages.json",
             cache_dir=cache_home / "nixstore",
             modules_file=Path(modules_file) if modules_file else flake_dir / "modules.json",
-            inputs_file=Path(inputs_file) if inputs_file else flake_dir / "nixstore-inputs.nix",
+            flake_file=Path(flake_file) if flake_file else flake_dir / "flake.nix",
         )
 
 
@@ -644,15 +644,16 @@ def disable_module(name: str, modules_path: str | Path) -> None:
 def remove_module(
     name: str,
     modules_path: str | Path,
-    inputs_file_path: str | Path,
+    flake_file_path: str | Path,
 ) -> None:
-    """Remove a module from the registry and optionally from nixstore-inputs.nix.
+    """Remove a module from the registry and from the inputs block of flake.nix.
 
     Raises PermissionError for system modules.
+    Raises ValueError if the input line is not found in flake.nix.
     Does NOT call rebuild() — caller must rebuild separately.
     """
     modules_path = Path(modules_path)
-    inputs_file_path = Path(inputs_file_path)
+    flake_file_path = Path(flake_file_path)
     registry = load_modules(modules_path)
     if name not in registry:
         raise ValueError(f"Module '{name}' not found in registry ({modules_path})")
@@ -665,36 +666,28 @@ def remove_module(
     del registry[name]
     save_modules(modules_path, registry)
 
-    # Remove from nixstore-inputs.nix if applicable
+    # Remove from flake.nix if applicable
     input_name = entry.get("input") if entry.get("type") == "flake-module" else None
-    if input_name and inputs_file_path.exists():
-        text = inputs_file_path.read_text()
-        new_text = text
+    if input_name and flake_file_path.exists():
+        text = flake_file_path.read_text()
 
-        # Remove simple `input.url = "...";` line
+        # Remove simple `input.url = "...";` line (with optional surrounding blank lines / comments)
         new_text = re.sub(
             rf"^[^\S\n]*{re.escape(input_name)}\.url\s*=\s*\"[^\"]*\";\s*\n",
             "",
-            new_text,
+            text,
             flags=re.MULTILINE,
-        )
-        # Remove block form `input = { ... };` (non-greedy, single block)
-        new_text = re.sub(
-            rf"^[^\S\n]*{re.escape(input_name)}\s*=\s*\{{[^}}]*\}};\s*\n",
-            "",
-            new_text,
-            flags=re.MULTILINE | re.DOTALL,
         )
 
         if new_text == text:
             raise ValueError(
-                f"Could not find input '{input_name}' in {inputs_file_path}. "
-                "Remove it manually from nixstore-inputs.nix."
+                f"Could not find input '{input_name}' in {flake_file_path}. "
+                "Remove it manually from flake.nix."
             )
 
-        tmp = inputs_file_path.with_suffix(inputs_file_path.suffix + ".tmp")
+        tmp = flake_file_path.with_suffix(flake_file_path.suffix + ".tmp")
         tmp.write_text(new_text)
-        os.replace(tmp, inputs_file_path)
+        os.replace(tmp, flake_file_path)
 
 
 def register_input(
@@ -743,17 +736,17 @@ def register_input(
 def add_flake_module(
     url: str,
     modules_path: str | Path,
-    inputs_file_path: str | Path,
+    flake_file_path: str | Path,
     flake_dir: str | Path,
     name: str | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
-    """Add a flake input, update flake.lock, and register it as a module.
+    """Add a flake input by patching flake.nix, update flake.lock, and register it as a module.
 
     Returns the registered name.
     """
     modules_path = Path(modules_path)
-    inputs_file_path = Path(inputs_file_path)
+    flake_file_path = Path(flake_file_path)
     flake_dir = Path(flake_dir)
 
     if name is None:
@@ -772,18 +765,44 @@ def add_flake_module(
             f"Input '{name}' already exists. Use --name to specify a different name."
         )
 
-    # Write the new input line into nixstore-inputs.nix
-    orig_text = inputs_file_path.read_text() if inputs_file_path.exists() else "{\n}\n"
-    insert_line = f"  {name}.url = \"{url}\";"
-    last_brace = orig_text.rfind("}")
-    if last_brace == -1:
+    # Patch flake.nix: insert `    {name}.url = "{url}";` before the closing `};`
+    # of the inputs block.
+    orig_text = flake_file_path.read_text()
+
+    # Find the inputs = { ... }; block.
+    inputs_start = orig_text.find("inputs = {")
+    if inputs_start == -1:
         raise ValueError(
-            f"Could not find closing '}}' in {inputs_file_path}. Cannot insert input safely."
+            f"Could not find 'inputs = {{' in {flake_file_path}. Cannot insert input safely."
         )
-    new_text = orig_text[:last_brace] + insert_line + "\n" + orig_text[last_brace:]
-    tmp = inputs_file_path.with_suffix(inputs_file_path.suffix + ".tmp")
+
+    # Find the matching closing `};` — walk forward counting braces.
+    brace_depth = 0
+    inputs_end = -1
+    i = orig_text.index("{", inputs_start)
+    while i < len(orig_text):
+        if orig_text[i] == "{":
+            brace_depth += 1
+        elif orig_text[i] == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                # orig_text[i] is the closing `}`, followed by `;`
+                inputs_end = i
+                break
+        i += 1
+
+    if inputs_end == -1:
+        raise ValueError(
+            f"Could not find closing '}}' of inputs block in {flake_file_path}. "
+            "Cannot insert input safely."
+        )
+
+    insert_line = f"    {name}.url = \"{url}\";\n"
+    new_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
+
+    tmp = flake_file_path.with_suffix(flake_file_path.suffix + ".tmp")
     tmp.write_text(new_text)
-    os.replace(tmp, inputs_file_path)
+    os.replace(tmp, flake_file_path)
 
     # Run `nix flake update <name>`, streaming output via progress_callback
     try:
@@ -802,10 +821,10 @@ def add_flake_module(
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, ["nix", "flake", "update", name])
     except Exception:
-        # Roll back the inputs file on failure
-        rollback_tmp = inputs_file_path.with_suffix(inputs_file_path.suffix + ".tmp")
+        # Roll back flake.nix on failure
+        rollback_tmp = flake_file_path.with_suffix(flake_file_path.suffix + ".tmp")
         rollback_tmp.write_text(orig_text)
-        os.replace(rollback_tmp, inputs_file_path)
+        os.replace(rollback_tmp, flake_file_path)
         raise
 
     # Probe and register
