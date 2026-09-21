@@ -273,7 +273,8 @@ def _check_flake_inputs(flake: Path) -> list[str]:
             shutil.copy(flake_lock, tmppath / "flake.lock")
 
             result = subprocess.run(
-                ["nix", "flake", "update", "--flake", str(tmppath)],
+                ["nix", "flake", "update", "--flake", str(tmppath),
+                 "--option", "tarball-ttl", "0"],
                 capture_output=True, text=True, timeout=180,
             )
             if result.returncode != 0:
