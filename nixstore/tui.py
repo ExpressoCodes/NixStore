@@ -1135,7 +1135,7 @@ class ModulesPanel(Vertical):
             self.notify("System modules cannot be removed.", severity="warning")
             return
         try:
-            core.remove_module(name, self.cfg.modules_file, self.cfg.inputs_file)
+            core.remove_module(name, self.cfg.modules_file, self.cfg.flake_file)
             self.notify(
                 f"Removed '{name}'. Run nixos-rebuild to apply.",
                 severity="information",
@@ -1201,7 +1201,7 @@ class ModulesPanel(Vertical):
                 core.add_flake_module,
                 url,
                 self.cfg.modules_file,
-                self.cfg.inputs_file,
+                self.cfg.flake_file,
                 self.cfg.flake,
                 None,
                 progress,
