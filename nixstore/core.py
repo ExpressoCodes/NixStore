@@ -558,13 +558,15 @@ def rebuild(flake_dir: str | Path) -> None:
     )
 
 
+_NON_MODULE_INPUTS = re.compile(r"^nixpkgs")
+
 def discover_inputs_from_lock(lock_path: str | Path) -> list[str]:
-    """Return sorted list of direct input names declared in flake.nix (root node inputs)."""
+    """Return sorted list of direct flake inputs from flake.nix, excluding package sets."""
     lock_path = Path(lock_path)
     data = json.loads(lock_path.read_text())
     nodes = data.get("nodes", {})
     root_inputs = nodes.get("root", {}).get("inputs", {})
-    return sorted(root_inputs.keys())
+    return sorted(k for k in root_inputs if not _NON_MODULE_INPUTS.match(k))
 
 
 def get_module_view(modules_path: str | Path, lock_path: str | Path) -> list[dict]:
