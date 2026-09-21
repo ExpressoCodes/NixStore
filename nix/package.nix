@@ -62,7 +62,7 @@ python3Packages.buildPythonApplication {
 
   meta = {
     description = "Search, install and remove NixOS packages from a TUI";
-    homepage = "https://github.com/ExpressoCodes/nixstore";
+    homepage = "https://github.com/ExpressoCodes/NixStore";
     license = lib.licenses.mit;
     mainProgram = "nixstore";
     platforms = lib.platforms.linux;

@@ -42,7 +42,7 @@ Add the flake to your system flake:
 ```nix
 {
   inputs.nixstore = {
-    url = "github:ExpressoCodes/nixstore";
+    url = "github:ExpressoCodes/NixStore";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -97,7 +97,7 @@ to manage them with NixStore.
 | `programs.nixstore.terminalCommand` | `null` | Terminal command for the desktop entry (`null` = `Terminal=true`) |
 | `programs.nixstore.package` | this flake | Package to use |
 
-Without the module: `nix run github:ExpressoCodes/nixstore`, or use
+Without the module: `nix run github:ExpressoCodes/NixStore`, or use
 `overlays.default` to get `pkgs.nixstore`. Set `NIXSTORE_FLAKE` and
 `NIXSTORE_PACKAGES_FILE` to point it at your files.
 
