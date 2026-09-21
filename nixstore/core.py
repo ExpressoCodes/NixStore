@@ -524,12 +524,18 @@ def get_module_view(modules_path: str | Path, lock_path: str | Path) -> list[dic
             row = {"name": inp, "status": "unregistered", "source": "", "type": "", "input": inp}
         rows.append(row)
 
-    # Registry entries NOT in flake.lock (removed from flake.nix without going through nixstore)
+    # Registry entries NOT in flake.lock
     for name, entry in registry.items():
         if name not in lock_inputs:
             row = dict(entry)
             row["name"] = name
-            row["status"] = "missing"
+            if entry.get("type") == "flake-module":
+                # Flake-module input missing from lock means it was removed from flake.nix
+                # externally (or an add-URL failed partway). Show as "missing" so user knows.
+                row["status"] = "missing"
+            else:
+                # Program-option entries have no flake.lock presence — show enabled/disabled.
+                row["status"] = "enabled" if entry.get("enabled", False) else "disabled"
             rows.append(row)
 
     def _sort_key(r: dict) -> tuple[int, str]:
