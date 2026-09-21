@@ -604,11 +604,12 @@ def remove_module(
     # Remove from flake.nix if applicable
     input_name = entry.get("input") if entry.get("type") == "flake-module" else None
     if input_name and flake_file_path.exists():
+        escaped = re.escape(input_name)
         text = flake_file_path.read_text()
 
-        # Remove simple `input.url = "...";` line (with optional surrounding blank lines / comments)
+        # Remove the .url = "..."; line (required)
         new_text = re.sub(
-            rf"^[^\S\n]*{re.escape(input_name)}\.url\s*=\s*\"[^\"]*\";\s*\n",
+            rf"^[^\S\n]*{escaped}\.url\s*=\s*\"[^\"]*\";\s*\n",
             "",
             text,
             flags=re.MULTILINE,
@@ -619,6 +620,22 @@ def remove_module(
                 f"Could not find input '{input_name}' in {flake_file_path}. "
                 "Remove it manually from flake.nix."
             )
+
+        # Remove preceding comment line (best-effort)
+        new_text = re.sub(
+            rf"^[^\S\n]*#\s*{escaped}\s*─*\s*\n",
+            "",
+            new_text,
+            flags=re.MULTILINE,
+        )
+
+        # Remove `<name>,  # ...` from outputs destructuring (best-effort)
+        new_text = re.sub(
+            rf"^[^\S\n]*{escaped},\s*(?:#[^\n]*)?\n",
+            "",
+            new_text,
+            flags=re.MULTILINE,
+        )
 
         _sudo_write(flake_file_path, new_text, password)
 
