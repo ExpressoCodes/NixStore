@@ -559,11 +559,12 @@ def rebuild(flake_dir: str | Path) -> None:
 
 
 def discover_inputs_from_lock(lock_path: str | Path) -> list[str]:
-    """Return sorted list of all input names from flake.lock, excluding 'root'."""
+    """Return sorted list of direct input names declared in flake.nix (root node inputs)."""
     lock_path = Path(lock_path)
     data = json.loads(lock_path.read_text())
     nodes = data.get("nodes", {})
-    return sorted(k for k in nodes if k != "root")
+    root_inputs = nodes.get("root", {}).get("inputs", {})
+    return sorted(root_inputs.keys())
 
 
 def get_module_view(modules_path: str | Path, lock_path: str | Path) -> list[dict]:
