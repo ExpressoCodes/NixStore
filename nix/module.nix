@@ -25,30 +25,6 @@ let
 
   initialFile = pkgs.writeText "nixstore-packages.json" (builtins.toJSON cfg.initialPackages + "\n");
 
-  # ── modules.json ─────────────────────────────────────────────────────────────
-
-  modulesFileExists = cfg.modulesFile != null && builtins.pathExists cfg.modulesFile;
-
-  # Parse modules.json at evaluation time; return an empty attrset when absent.
-  moduleEntries =
-    if modulesFileExists then builtins.fromJSON (builtins.readFile cfg.modulesFile) else { };
-
-  # Build a single merged attrset for all program-option entries.
-  programOptionAttrs = builtins.foldl' lib.recursiveUpdate { } (
-    lib.mapAttrsToList (
-      _name: entry:
-      if entry.type or "" == "program-option" && entry.enabled or false then
-        let
-          optPath = lib.splitString "." entry.option;
-          parentPath = lib.init optPath;
-          baseAttrs = lib.setAttrByPath optPath true;
-          extrasAttrs = lib.optionalAttrs (entry ? extras) (lib.setAttrByPath parentPath entry.extras);
-        in
-        lib.recursiveUpdate baseAttrs extrasAttrs
-      else
-        { }
-    ) moduleEntries
-  );
 in
 {
   options.programs.nixstore = {
@@ -170,8 +146,5 @@ in
       '';
     })
 
-    # ── program-option entries from modules.json ────────────────────────────
-    # Applied only when nixstore is enabled and modules.json has content.
-    (mkIf (cfg.enable && modulesFileExists) programOptionAttrs)
   ];
 }
