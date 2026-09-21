@@ -34,6 +34,25 @@ exit 1
 """
 
 
+def _sudo_write(path: Path, content: str) -> None:
+    """Write content to a file that may be root-owned, using sudo install if needed."""
+    if os.access(path.parent, os.W_OK) and (not path.exists() or os.access(path, os.W_OK)):
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(content)
+        os.replace(tmp, path)
+    else:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tmp", delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            subprocess.run(
+                ["sudo", "install", "-m", "644", tmp_path, str(path)],
+                check=True,
+            )
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class Config:
     flake: Path
@@ -545,9 +564,7 @@ def save_modules(path: str | Path, data: dict) -> None:
     """Atomically write modules registry JSON to path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    os.replace(tmp, path)
+    _sudo_write(path, json.dumps(data, indent=2) + "\n")
 
 
 def rebuild(flake_dir: str | Path) -> None:
@@ -688,9 +705,7 @@ def remove_module(
                 "Remove it manually from flake.nix."
             )
 
-        tmp = flake_file_path.with_suffix(flake_file_path.suffix + ".tmp")
-        tmp.write_text(new_text)
-        os.replace(tmp, flake_file_path)
+        _sudo_write(flake_file_path, new_text)
 
 
 def register_input(
@@ -803,14 +818,12 @@ def add_flake_module(
     insert_line = f"    {name}.url = \"{url}\";\n"
     new_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
 
-    tmp = flake_file_path.with_suffix(flake_file_path.suffix + ".tmp")
-    tmp.write_text(new_text)
-    os.replace(tmp, flake_file_path)
+    _sudo_write(flake_file_path, new_text)
 
     # Run `nix flake update <name>`, streaming output via progress_callback
     try:
         proc = subprocess.Popen(
-            ["nix", "flake", "update", name],
+            ["sudo", "nix", "flake", "update", name],
             cwd=str(flake_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -825,9 +838,7 @@ def add_flake_module(
             raise subprocess.CalledProcessError(proc.returncode, ["nix", "flake", "update", name])
     except Exception:
         # Roll back flake.nix on failure
-        rollback_tmp = flake_file_path.with_suffix(flake_file_path.suffix + ".tmp")
-        rollback_tmp.write_text(orig_text)
-        os.replace(rollback_tmp, flake_file_path)
+        _sudo_write(flake_file_path, orig_text)
         raise
 
     # Probe and register
