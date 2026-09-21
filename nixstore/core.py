@@ -579,6 +579,7 @@ def remove_module(
     name: str,
     modules_path: str | Path,
     flake_file_path: str | Path,
+    password: str = "",
 ) -> None:
     """Remove a module from the registry and from the inputs block of flake.nix.
 
@@ -619,10 +620,10 @@ def remove_module(
                 "Remove it manually from flake.nix."
             )
 
-        _sudo_write(flake_file_path, new_text)
+        _sudo_write(flake_file_path, new_text, password)
 
 
-def remove_unregistered_input(name: str, flake_file_path: str | Path) -> None:
+def remove_unregistered_input(name: str, flake_file_path: str | Path, password: str = "") -> None:
     """Remove a flake input that is in flake.lock but not in the registry.
 
     Strips the `<name>.url = "...";` line from flake.nix so the input is
@@ -641,7 +642,7 @@ def remove_unregistered_input(name: str, flake_file_path: str | Path) -> None:
             f"Could not find '{name}.url = ...' in {flake_file_path}. "
             "Remove it manually from flake.nix."
         )
-    _sudo_write(flake_file_path, new_text)
+    _sudo_write(flake_file_path, new_text, password)
 
 
 def register_input(
