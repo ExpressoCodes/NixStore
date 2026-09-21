@@ -40,8 +40,6 @@ let
 
 in
 {
-  imports = map (m: inputs.${m.input}.nixosModules.default) flakeEntries;
-
   options.programs.nixstore = {
     enable = mkEnableOption "NixStore, a TUI to search, install and remove packages";
 
