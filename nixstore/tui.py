@@ -927,11 +927,17 @@ class ModulesPanel(Vertical):
             placeholder="Flake URL to add, e.g. github:Org/repo — Enter to confirm, Esc to cancel",
             id="mod-add-input",
         )
+        yield Input(
+            password=True,
+            placeholder="sudo password — Enter to confirm, Esc to cancel",
+            id="mod-sudo-input",
+        )
         yield RichLog(id="mod-log", wrap=True, markup=False)
         yield Label("", id="mod-footer")
 
     def on_mount(self) -> None:
         self.query_one("#mod-add-input").display = False
+        self.query_one("#mod-sudo-input").display = False
         self.query_one("#mod-log").display = False
         self.load_modules()
 
@@ -1167,16 +1173,45 @@ class ModulesPanel(Vertical):
         if not url:
             self.clear_active_input()
             return
+        self._pending_url = url
         self.query_one("#mod-add-input", Input).display = False
+        pw = self.query_one("#mod-sudo-input", Input)
+        pw.value = ""
+        pw.display = True
+        pw.focus()
+        self._set_footer("Enter sudo password to continue.")
+
+    @on(Input.Submitted, "#mod-sudo-input")
+    def sudo_input_submitted(self, event: Input.Submitted) -> None:
+        password = event.value
+        event.input.value = ""
+        event.input.display = False
+        url = getattr(self, "_pending_url", "")
+        if not url:
+            return
         log = self.query_one("#mod-log", RichLog)
+        log.clear()
         log.display = True
-        self._run_add(url)
+        self._run_add(url, password)
 
     @work(exclusive=True, group="mod-add")
-    async def _run_add(self, url: str) -> None:
+    async def _run_add(self, url: str, password: str = "") -> None:
         self._busy = True
         log = self.query_one("#mod-log", RichLog)
         self._set_footer(f"Adding {url}… (running nix flake update, please wait)", "bold yellow")
+
+        if password:
+            check = await asyncio.create_subprocess_exec(
+                "sudo", "-S", "-k", "-v", "-p", "",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await check.communicate((password + "\n").encode())
+            if check.returncode != 0:
+                self._set_footer("Wrong password — press 'a' to try again.", "bold red")
+                self._busy = False
+                return
 
         def progress(line: str) -> None:
             self.app.call_from_thread(log.write, Text.from_ansi(line))
@@ -1223,9 +1258,21 @@ class ModulesPanel(Vertical):
 
     def clear_active_input(self) -> bool:
         inp = self.query_one("#mod-add-input", Input)
+        pw = self.query_one("#mod-sudo-input", Input)
+        if pw.display:
+            pw.display = False
+            pw.value = ""
+            self._pending_url = ""
+            self._set_footer("")
+            try:
+                self.query_one(ModuleTable).focus()
+            except Exception:  # noqa: BLE001
+                pass
+            return True
         if inp.display:
             inp.display = False
             inp.value = ""
+            self._pending_url = ""
             self._set_footer("")
             try:
                 self.query_one(ModuleTable).focus()
