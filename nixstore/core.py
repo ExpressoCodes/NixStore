@@ -7,6 +7,7 @@ import dataclasses
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -233,77 +234,21 @@ def notify(summary: str, body: str, urgency: str = "normal") -> None:
         pass
 
 
-VARS_FILE = Path("/etc/nixos/.dotfiles-vars")
-
-
-def read_dotfiles_vars() -> dict[str, str]:
-    if not VARS_FILE.exists():
-        return {}
-    result: dict[str, str] = {}
-    for line in VARS_FILE.read_text().splitlines():
-        if "=" in line and not line.startswith("#"):
-            k, _, v = line.partition("=")
-            result[k.strip()] = v.strip()
-    return result
-
-
 # --- system update helpers ----------------------------------------------------
-
-import shutil
 
 
 @dataclass(frozen=True)
 class SystemUpdateStatus:
-    is_git_repo: bool
-    commits_behind: int
-    commits: list[str]  # one-line summaries of unpulled commits
-    flake_inputs_updated: list[str]  # flake input names whose rev would change
+    flake_inputs_updated: list[str]
 
     @property
     def has_updates(self) -> bool:
-        return self.commits_behind > 0 or bool(self.flake_inputs_updated)
-
-    @property
-    def git_up_to_date(self) -> bool:
-        return not self.is_git_repo or self.commits_behind == 0
+        return bool(self.flake_inputs_updated)
 
 
 def check_system_updates(flake: Path) -> SystemUpdateStatus:
-    """Check dotfiles repo for pending commits and flake inputs for available updates."""
-    vars_ = read_dotfiles_vars()
-    repo_str = vars_.get("DOTFILES_REPO")
-    repo = Path(repo_str) if repo_str else flake
-    if not (repo / ".git").exists():
-        return SystemUpdateStatus(
-            is_git_repo=False,
-            commits_behind=0,
-            commits=[],
-            flake_inputs_updated=_check_flake_inputs(flake),
-        )
-    git = shutil.which("git") or "git"
-
-    def run(*args: str) -> str:
-        r = subprocess.run([git, "-C", str(repo), *args], capture_output=True, text=True)
-        return r.stdout.strip() if r.returncode == 0 else ""
-
-    run("fetch", "--quiet", "origin")
-    local = run("rev-parse", "HEAD")
-    remote = (run("rev-parse", "origin/HEAD")
-              or run("rev-parse", "origin/main")
-              or run("rev-parse", "origin/master"))
-    if not local or not remote or local == remote:
-        commits_behind, commits = 0, []
-    else:
-        commits_behind = int(run("rev-list", "--count", f"HEAD..{remote}") or "0")
-        commits = [c for c in run("log", "--oneline", f"HEAD..{remote}").splitlines() if c]
-
-    flake_inputs_updated = _check_flake_inputs(flake)
-    return SystemUpdateStatus(
-        is_git_repo=True,
-        commits_behind=commits_behind,
-        commits=commits,
-        flake_inputs_updated=flake_inputs_updated,
-    )
+    """Check flake inputs for available updates."""
+    return SystemUpdateStatus(flake_inputs_updated=_check_flake_inputs(flake))
 
 
 def _check_flake_inputs(flake: Path) -> list[str]:
@@ -349,122 +294,27 @@ def _check_flake_inputs(flake: Path) -> list[str]:
 
 
 async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # noqa: ANN001
-    """git-pull dotfiles (self-updating update.sh) then run it non-interactively.
+    """Update all flake inputs and rebuild NixOS."""
 
-    password_cb: async (prompt: str) -> str, called when sudo needs a password.
-    When set, a SUDO_ASKPASS script bridges sudo's password request to this callback.
-    """
-    vars_ = read_dotfiles_vars()
-    dotfiles_str = vars_.get("DOTFILES_REPO")
-
-    import stat as _stat
-    tmpdir = tempfile.mkdtemp(prefix="nixstore-")
-    watcher: asyncio.Task | None = None
-    try:
-        env: dict = {**os.environ, "NIXSTORE_NONINTERACTIVE": "1"}
-
-        if password_cb is not None:
-            req_file = Path(tmpdir) / "sudo-req"
-            resp_file = Path(tmpdir) / "sudo-resp"
-            askpass = Path(tmpdir) / "askpass.sh"
-            askpass.write_text(
-                f"#!/usr/bin/env bash\n"
-                f"printf '%s' \"$1\" > {req_file}\n"
-                f"while [ ! -f {resp_file} ]; do sleep 0.05; done\n"
-                f"cat {resp_file}\n"
-                f"rm -f {resp_file}\n"
-            )
-            askpass.chmod(_stat.S_IRWXU)
-            env["SUDO_ASKPASS"] = str(askpass)
-
-            async def _watch_password() -> None:
-                while True:
-                    if req_file.exists():
-                        try:
-                            prompt = req_file.read_text().strip()
-                            req_file.unlink(missing_ok=True)
-                            password = await password_cb(prompt)
-                            resp_file.write_text(password + "\n")
-                        except Exception:
-                            pass
-                    await asyncio.sleep(0.1)
-
-            watcher = asyncio.create_task(_watch_password())
-
-        async def _stream(cmd: list[str], stream_env: dict | None = None) -> int:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, env=stream_env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-
-            async def _drain() -> None:
-                async for raw in proc.stdout:
-                    await log_cb(raw.decode(errors="replace").rstrip("\n"))
-
-            drain_task = asyncio.create_task(_drain())
-            await proc.wait()
-            try:
-                await asyncio.wait_for(drain_task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                drain_task.cancel()
-            return proc.returncode
-
-        if not dotfiles_str:
-            await log_cb("No dotfiles repo configured — running nix flake update + nixos-rebuild.")
-            rc = await _stream(["sudo", "nix", "flake", "update", "--flake", str(flake)])
-            if rc != 0:
-                await log_cb("nix flake update failed.")
-                return False
-            rc = await _stream(["sudo", "nixos-rebuild", "switch", "--flake", str(flake)])
-            return rc == 0
-        dotfiles = Path(dotfiles_str)
-        update_sh = dotfiles / "update.sh"
-        if not update_sh.exists():
-            await log_cb(f"update.sh not found at {update_sh} — running nix flake update + nixos-rebuild.")
-            rc = await _stream(["sudo", "nix", "flake", "update", "--flake", str(flake)])
-            if rc != 0:
-                await log_cb("nix flake update failed.")
-                return False
-            rc = await _stream(["sudo", "nixos-rebuild", "switch", "--flake", str(flake)])
-            return rc == 0
-
-        # Stash any local changes so git pull --ff-only won't be blocked.
-        await log_cb(f"==> git stash {dotfiles}")
-        stash_proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(dotfiles), "stash", "--include-untracked",
+    async def _stream(cmd: list[str]) -> int:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        stash_out_bytes, _ = await stash_proc.communicate()
-        stash_out = stash_out_bytes.decode(errors="replace").strip()
-        await log_cb(stash_out)
-        something_stashed = "No local changes to save" not in stash_out
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            await log_cb(raw.decode(errors="replace").rstrip("\n"))
+        await proc.wait()
+        return proc.returncode or 0
 
-        # Pull dotfiles — self-updates update.sh before we run it.
-        await log_cb(f"==> git pull {dotfiles}")
-        rc = await _stream(["git", "-C", str(dotfiles), "pull", "--ff-only"])
-        if rc != 0:
-            if something_stashed:
-                await log_cb("==> git stash pop (restoring changes after failed pull)")
-                await _stream(["git", "-C", str(dotfiles), "stash", "pop"])
-            await log_cb("git pull failed — aborting.")
-            return False
+    await log_cb("==> nix flake update")
+    if await _stream(["sudo", "nix", "flake", "update", "--flake", str(flake)]) != 0:
+        await log_cb("nix flake update failed.")
+        return False
 
-        if something_stashed:
-            await log_cb("==> git stash pop")
-            await _stream(["git", "-C", str(dotfiles), "stash", "pop"])
-
-        # Run the freshly-pulled update.sh non-interactively.
-        # --no-pull skips its own git pull (we already did it above).
-        await log_cb("==> Running update.sh")
-        rc = await _stream(["bash", str(update_sh), "--no-pull"], stream_env=env)
-        return rc == 0
-    finally:
-        if watcher is not None:
-            watcher.cancel()
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    await log_cb("==> nixos-rebuild switch")
+    return await _stream(["sudo", "nixos-rebuild", "switch", "--flake", str(flake)]) == 0
 
 
 # --- flatpak ------------------------------------------------------------------
@@ -836,7 +686,6 @@ def add_flake_module(
 
     _sudo_write(flake_file_path, new_text)
 
-    # Run `nix flake update <name>`, streaming output via progress_callback
     try:
         proc = subprocess.Popen(
             ["sudo", "nix", "flake", "update", name],
@@ -851,9 +700,8 @@ def add_flake_module(
                 progress_callback(line.rstrip("\n"))
         proc.wait()
         if proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, ["nix", "flake", "update", name])
+            raise subprocess.CalledProcessError(proc.returncode, ["sudo", "nix", "flake", "update", name])
     except Exception:
-        # Roll back flake.nix on failure
         _sudo_write(flake_file_path, orig_text)
         raise
 
