@@ -1200,19 +1200,6 @@ class ModulesPanel(Vertical):
         log = self.query_one("#mod-log", RichLog)
         self._set_footer(f"Adding {url}… (running nix flake update, please wait)", "bold yellow")
 
-        if password:
-            check = await asyncio.create_subprocess_exec(
-                "sudo", "-S", "-k", "-v", "-p", "",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await check.communicate((password + "\n").encode())
-            if check.returncode != 0:
-                self._set_footer("Wrong password — press 'a' to try again.", "bold red")
-                self._busy = False
-                return
-
         def progress(line: str) -> None:
             self.app.call_from_thread(log.write, Text.from_ansi(line))
 
@@ -1225,6 +1212,7 @@ class ModulesPanel(Vertical):
                 self.cfg.flake,
                 None,
                 progress,
+                password,
             )
             self.notify(f"Added module '{name}'.", severity="information")
             self._set_footer(f"✓ Added '{name}'.", "bold green")

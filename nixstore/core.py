@@ -35,7 +35,7 @@ exit 1
 """
 
 
-def _sudo_write(path: Path, content: str) -> None:
+def _sudo_write(path: Path, content: str, password: str = "") -> None:
     """Write content to a file that may be root-owned, using sudo install if needed."""
     if os.access(path.parent, os.W_OK) and (not path.exists() or os.access(path, os.W_OK)):
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -46,8 +46,10 @@ def _sudo_write(path: Path, content: str) -> None:
             f.write(content)
             tmp_path = f.name
         try:
+            cmd = ["sudo", "-S", "-p", "", "install", "-m", "644", tmp_path, str(path)]
             subprocess.run(
-                ["sudo", "install", "-m", "644", tmp_path, str(path)],
+                cmd,
+                input=(password + "\n").encode() if password else None,
                 check=True,
             )
         finally:
@@ -624,6 +626,7 @@ def add_flake_module(
     flake_dir: str | Path,
     name: str | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    password: str = "",
 ) -> str:
     """Add a flake input by patching flake.nix, update flake.lock, and register it as a module.
 
@@ -684,25 +687,29 @@ def add_flake_module(
     insert_line = f"    {name}.url = \"{url}\";\n"
     new_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
 
-    _sudo_write(flake_file_path, new_text)
+    _sudo_write(flake_file_path, new_text, password=password)
 
     try:
         proc = subprocess.Popen(
-            ["sudo", "nix", "flake", "update", name],
+            ["sudo", "-S", "-p", "", "nix", "flake", "update", name],
             cwd=str(flake_dir),
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        assert proc.stdout is not None
+        assert proc.stdout is not None and proc.stdin is not None
+        if password:
+            proc.stdin.write(password + "\n")
+        proc.stdin.close()
         for line in proc.stdout:
             if progress_callback is not None:
                 progress_callback(line.rstrip("\n"))
         proc.wait()
         if proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, ["sudo", "nix", "flake", "update", name])
+            raise subprocess.CalledProcessError(proc.returncode, ["sudo", "-S", "-p", "", "nix", "flake", "update", name])
     except Exception:
-        _sudo_write(flake_file_path, orig_text)
+        _sudo_write(flake_file_path, orig_text, password=password)
         raise
 
     # Probe and register
