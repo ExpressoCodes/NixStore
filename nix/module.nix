@@ -114,6 +114,17 @@ in
         rendered path from config to know which file to string-patch.
       '';
     };
+
+    dotfilesDir = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/home/alice/dotfiles";
+      description = ''
+        Absolute path to your dotfiles repository. When set, System Update
+        will sync dotfiles home-config and /etc/nixos templates before
+        rebuilding. Leave null to skip dotfiles sync.
+      '';
+    };
   };
 
   config = lib.mkMerge [
@@ -128,6 +139,7 @@ in
         (cfg.package.override {
           inherit (cfg) flake terminalCommand;
           packagesFile = cfg.packagesFilePath;
+          dotfilesDir = cfg.dotfilesDir;
         })
       ]
       ++ lib.optionals (cfg.packagesFile != null) (
