@@ -1138,28 +1138,40 @@ class ModulesPanel(Vertical):
             return
         status = mod.get("status", "")
         source = mod.get("source", "")
-        if status == "unregistered":
-            try:
-                core.remove_unregistered_input(name, self.cfg.flake_file)
-                self.notify(
-                    f"Removed '{name}' from flake.nix. Run nixos-rebuild to apply.",
-                    severity="information",
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.notify(str(exc), severity="error")
-            self.load_modules()
-            return
         if source == "system":
             self.notify("System modules cannot be removed.", severity="warning")
             return
+        if status not in ("unregistered", "enabled", "disabled"):
+            return
+        self._pending_delete = name
+        pw = self.query_one("#mod-sudo-input", Input)
+        pw.value = ""
+        pw.display = True
+        pw.focus()
+        self._set_footer("Enter sudo password to remove, or Esc to cancel.")
+
+    @work(exclusive=True, group="mod-remove")
+    async def _run_remove(self, name: str, password: str) -> None:
+        self._busy = True
+        self._set_footer(f"Removing '{name}'…", "bold yellow")
+        mod = next((m for m in self._modules if m["name"] == name), None)
+        status = mod.get("status", "") if mod else ""
         try:
-            core.remove_module(name, self.cfg.modules_file, self.cfg.flake_file)
-            self.notify(
-                f"Removed '{name}'. Run nixos-rebuild to apply.",
-                severity="information",
-            )
+            if status == "unregistered":
+                await asyncio.to_thread(
+                    core.remove_unregistered_input, name, self.cfg.flake_file, password
+                )
+            else:
+                await asyncio.to_thread(
+                    core.remove_module, name, self.cfg.modules_file, self.cfg.flake_file, password
+                )
+            self.notify(f"Removed '{name}'. Run nixos-rebuild to apply.", severity="information")
+            self._set_footer("")
         except Exception as exc:  # noqa: BLE001
             self.notify(str(exc), severity="error")
+            self._set_footer(str(exc), "bold red")
+        finally:
+            self._busy = False
         self.load_modules()
 
     def action_register(self) -> None:
@@ -1213,6 +1225,11 @@ class ModulesPanel(Vertical):
         password = event.value
         event.input.value = ""
         event.input.display = False
+        delete_name = getattr(self, "_pending_delete", "")
+        if delete_name:
+            self._pending_delete = ""
+            self._run_remove(delete_name, password)
+            return
         url = getattr(self, "_pending_url", "")
         if not url:
             return
@@ -1287,6 +1304,7 @@ class ModulesPanel(Vertical):
             pw.display = False
             pw.value = ""
             self._pending_url = ""
+            self._pending_delete = ""
             self._set_footer("")
             try:
                 self.query_one(ModuleTable).focus()
