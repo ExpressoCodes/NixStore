@@ -673,7 +673,6 @@ def add_flake_module(
         elif orig_text[i] == "}":
             brace_depth -= 1
             if brace_depth == 0:
-                # orig_text[i] is the closing `}`, followed by `;`
                 inputs_end = i
                 break
         i += 1
@@ -685,20 +684,44 @@ def add_flake_module(
         )
 
     insert_line = f"    {name}.url = \"{url}\";\n"
-    new_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
+    new_flake_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
 
-    _sudo_write(flake_file_path, new_text, password=password)
+    # Build updated modules registry
+    new_registry = dict(registry)
+    new_registry[name] = {"source": "user", "enabled": False, "type": "flake-module", "input": name}
+    new_modules_text = json.dumps(new_registry, indent=2) + "\n"
 
+    # Write temp files as the current user (always writable)
+    tmp_new_flake = tmp_orig_flake = tmp_modules = ""
     try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".nix", delete=False) as f:
+            f.write(new_flake_text)
+            tmp_new_flake = f.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".nix", delete=False) as f:
+            f.write(orig_text)
+            tmp_orig_flake = f.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write(new_modules_text)
+            tmp_modules = f.name
+
+        # Single sudo authentication: install flake.nix, update lock, install modules.json.
+        # On nix flake update failure the script restores the original flake.nix before exiting.
+        script = (
+            f"install -m 644 '{tmp_new_flake}' '{flake_file_path}' && "
+            f"cd '{flake_dir}' && "
+            f"nix flake update {name} && "
+            f"install -m 644 '{tmp_modules}' '{modules_path}' "
+            f"|| (install -m 644 '{tmp_orig_flake}' '{flake_file_path}' 2>/dev/null; exit 1)"
+        )
+
         proc = subprocess.Popen(
-            ["sudo", "-S", "-p", "", "nix", "flake", "update", name],
-            cwd=str(flake_dir),
+            ["sudo", "-S", "-p", "", "sh", "-c", script],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        assert proc.stdout is not None and proc.stdin is not None
+        assert proc.stdin is not None and proc.stdout is not None
         if password:
             proc.stdin.write(password + "\n")
         proc.stdin.close()
@@ -707,11 +730,10 @@ def add_flake_module(
                 progress_callback(line.rstrip("\n"))
         proc.wait()
         if proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, ["sudo", "-S", "-p", "", "nix", "flake", "update", name])
-    except Exception:
-        _sudo_write(flake_file_path, orig_text, password=password)
-        raise
+            raise subprocess.CalledProcessError(proc.returncode, f"sudo sh (add {name})")
+    finally:
+        for p in (tmp_new_flake, tmp_orig_flake, tmp_modules):
+            if p:
+                Path(p).unlink(missing_ok=True)
 
-    # Probe and register
-    register_input(name, modules_path, flake_dir)
     return name
