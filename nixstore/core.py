@@ -687,6 +687,24 @@ def register_input(
     return entry
 
 
+def _normalize_flake_url(url: str) -> str:
+    """Convert GitHub HTTPS URLs to nix flake github: protocol."""
+    import re as _re
+    url = url.strip()
+    # https://github.com/Owner/Repo[.git][/] → github:Owner/Repo
+    m = _re.match(r"https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$", url)
+    if m:
+        return f"github:{m.group(1)}"
+    # git@github.com:Owner/Repo.git → github:Owner/Repo
+    m = _re.match(r"git@github\.com:([^/]+/[^/]+?)(?:\.git)?$", url)
+    if m:
+        return f"github:{m.group(1)}"
+    # strip trailing .git from any github: shorthand
+    if url.startswith("github:") and url.endswith(".git"):
+        url = url[:-4]
+    return url
+
+
 def add_flake_module(
     url: str,
     modules_path: str | Path,
@@ -704,8 +722,10 @@ def add_flake_module(
     flake_file_path = Path(flake_file_path)
     flake_dir = Path(flake_dir)
 
+    url = _normalize_flake_url(url)
+
     if name is None:
-        name = url.rstrip("/").rsplit("/", 1)[-1]
+        name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
 
     # Guard: duplicate in lock or registry
     lock_path = flake_dir / "flake.lock"

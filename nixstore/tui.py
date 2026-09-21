@@ -871,9 +871,10 @@ class ModuleTable(DataTable):
     """Focusable row-cursor table for the Modules panel."""
 
     BINDINGS = [
-        Binding("space", "toggle_mod", "Toggle"),
+        Binding("i", "install_mod", "Install"),
+        Binding("u", "uninstall_mod", "Uninstall"),
         Binding("a", "add_url", "Add URL"),
-        Binding("d", "remove_mod", "Remove"),
+        Binding("d", "remove_mod", "Delete"),
         Binding("r", "register_mod", "Register"),
     ]
 
@@ -894,9 +895,13 @@ class ModuleTable(DataTable):
                 return node
         return None
 
-    def action_toggle_mod(self) -> None:
+    def action_install_mod(self) -> None:
         if (p := self._panel()) is not None:
-            p.action_toggle()
+            p.action_install()
+
+    def action_uninstall_mod(self) -> None:
+        if (p := self._panel()) is not None:
+            p.action_uninstall()
 
     def action_add_url(self) -> None:
         if (p := self._panel()) is not None:
@@ -1041,12 +1046,14 @@ class ModulesPanel(Vertical):
     def _hint(self, mod: dict) -> str:
         status = mod.get("status", "")
         source = mod.get("source", "")
-        if status in ("enabled", "disabled"):
-            return "Space: toggle  d: remove" if source == "user" else "Space: toggle"
+        if status == "enabled":
+            return "u: uninstall" + ("  d: delete" if source == "user" else "")
+        if status == "disabled":
+            return "i: install" + ("  d: delete" if source == "user" else "")
         if status == "unregistered":
-            return "r: register  d: remove from flake.nix"
+            return "r: register  d: delete from flake.nix"
         if status == "missing":
-            return "d: remove from registry"
+            return "d: delete from registry"
         return ""
 
     def _set_footer(self, text: str, style: str = "") -> None:
@@ -1054,28 +1061,40 @@ class ModulesPanel(Vertical):
 
     # --- actions --------------------------------------------------------------
 
-    def action_toggle(self) -> None:
+    def _get_highlighted_mod(self) -> dict | None:
+        name = self.query_one(ModuleTable).highlighted_name()
+        if name is None:
+            return None
+        return next((m for m in self._modules if m["name"] == name), None)
+
+    def action_install(self) -> None:
         if self._busy:
             self.notify("Busy — please wait.", severity="warning")
             return
-        name = self.query_one(ModuleTable).highlighted_name()
-        if name is None:
-            return
-        mod = next((m for m in self._modules if m["name"] == name), None)
+        mod = self._get_highlighted_mod()
         if mod is None:
             return
-        status = mod.get("status", "")
-        if status == "enabled":
-            self._run_toggle(name, enable=False)
-        elif status == "disabled":
-            self._run_toggle(name, enable=True)
-        else:
-            self.notify("Only registered, non-missing modules can be toggled.", severity="warning")
+        if mod.get("status") != "disabled":
+            self.notify("Module is not disabled — nothing to install.", severity="warning")
+            return
+        self._run_toggle(mod["name"], enable=True)
+
+    def action_uninstall(self) -> None:
+        if self._busy:
+            self.notify("Busy — please wait.", severity="warning")
+            return
+        mod = self._get_highlighted_mod()
+        if mod is None:
+            return
+        if mod.get("status") != "enabled":
+            self.notify("Module is not enabled — nothing to uninstall.", severity="warning")
+            return
+        self._run_toggle(mod["name"], enable=False)
 
     @work(exclusive=True, group="mod-toggle")
     async def _run_toggle(self, name: str, enable: bool) -> None:
         self._busy = True
-        verb = "Enabling" if enable else "Disabling"
+        verb = "Installing" if enable else "Uninstalling"
         self._set_footer(f"{verb} {name}… (rebuilding NixOS, please wait)", "bold yellow")
         try:
             if enable:
@@ -1083,7 +1102,7 @@ class ModulesPanel(Vertical):
             else:
                 await asyncio.to_thread(core.disable_module, name, self.cfg.modules_file)
             self.notify(
-                f"{'Enabled' if enable else 'Disabled'} '{name}' — NixOS rebuilt.",
+                f"{'Installed' if enable else 'Uninstalled'} '{name}' — NixOS rebuilt.",
                 severity="information",
             )
             self._set_footer("")
@@ -1248,7 +1267,13 @@ class ModulesPanel(Vertical):
 
     @on(DataTable.RowSelected)
     def row_selected(self, _: DataTable.RowSelected) -> None:
-        self.action_toggle()
+        mod = self._get_highlighted_mod()
+        if mod is None:
+            return
+        if mod.get("status") == "enabled":
+            self.action_uninstall()
+        elif mod.get("status") == "disabled":
+            self.action_install()
 
     # --- interface for NixStore app -------------------------------------------
 
