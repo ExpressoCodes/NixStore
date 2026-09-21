@@ -152,15 +152,14 @@ in
       '';
     };
 
-    inputsFile = mkOption {
+    flakeFile = mkOption {
       type = types.nullOr types.path;
       default = null;
-      example = lib.literalExpression "./nixstore-inputs.nix";
+      example = lib.literalExpression "./flake.nix";
       description = ''
-        Path to the Nix file owned by NixStore that declares the flake inputs
-        NixStore manages (e.g. nixstore-inputs.nix).  This is informational:
-        the Python app reads the rendered path from config to know where to
-        write and update that file.
+        Path to the flake.nix file where NixStore will add and remove flake
+        input entries.  This is informational: the Python app reads the
+        rendered path from config to know which file to string-patch.
       '';
     };
   };
