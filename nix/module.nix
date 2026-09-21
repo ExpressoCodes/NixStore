@@ -33,25 +33,6 @@ let
   moduleEntries =
     if modulesFileExists then builtins.fromJSON (builtins.readFile cfg.modulesFile) else { };
 
-  # Build the list of flake-module imports.  Skip entries whose `input` is not
-  # present in `inputs` and emit a trace warning so the user knows.
-  flakeModuleImports = builtins.concatLists (
-    lib.mapAttrsToList (
-      name: entry:
-      if entry.type or "" == "flake-module" && entry.enabled or false then
-        if builtins.hasAttr (entry.input or "") inputs then
-          [ inputs.${entry.input}.nixosModules.default ]
-        else
-          builtins.trace
-            "nixstore: skipping module '${name}' — input '${
-              entry.input or ""
-            }' not found in inputs"
-            [ ]
-      else
-        [ ]
-    ) moduleEntries
-  );
-
   # Build a single merged attrset for all program-option entries.
   programOptionAttrs = builtins.foldl' lib.recursiveUpdate { } (
     lib.mapAttrsToList (
@@ -70,11 +51,6 @@ let
   );
 in
 {
-  # Conditionally import flake modules listed in modules.json.  The list is
-  # empty when nixstore is disabled or modulesFile does not exist, so this is
-  # a no-op in those cases.
-  imports = lib.optionals cfg.enable flakeModuleImports;
-
   options.programs.nixstore = {
     enable = mkEnableOption "NixStore, a TUI to search, install and remove packages";
 
