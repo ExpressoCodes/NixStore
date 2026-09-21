@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Self
+from typing import Callable, Self
 
 # Library/package sets that are almost never what you want in systemPackages.
 SKIP_RE = re.compile(
@@ -38,16 +39,22 @@ class Config:
     flake: Path
     packages_file: Path
     cache_dir: Path
+    modules_file: Path = field(default=None)  # type: ignore[assignment]
+    inputs_file: Path = field(default=None)  # type: ignore[assignment]
 
     @classmethod
     def from_env(cls, flake: str | None = None) -> Config:
         flake_dir = Path(flake or os.environ.get("NIXSTORE_FLAKE", "/etc/nixos"))
         packages_file = os.environ.get("NIXSTORE_PACKAGES_FILE") if flake is None else None
+        modules_file = os.environ.get("NIXSTORE_MODULES_FILE") if flake is None else None
+        inputs_file = os.environ.get("NIXSTORE_INPUTS_FILE") if flake is None else None
         cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
         return cls(
             flake=flake_dir,
             packages_file=Path(packages_file) if packages_file else flake_dir / "packages.json",
             cache_dir=cache_home / "nixstore",
+            modules_file=Path(modules_file) if modules_file else flake_dir / "modules.json",
+            inputs_file=Path(inputs_file) if inputs_file else flake_dir / "nixstore-inputs.nix",
         )
 
 
@@ -518,3 +525,289 @@ async def remove_flatpak(app_id: str, log_cb) -> bool:  # noqa: ANN001
         log_cb(raw.decode(errors="replace").rstrip("\n"))
     await proc.wait()
     return proc.returncode == 0
+
+
+# --- module management --------------------------------------------------------
+
+
+def load_modules(path: str | Path) -> dict:
+    """Read and JSON-parse modules.json. Returns {} if file doesn't exist."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
+
+
+def save_modules(path: str | Path, data: dict) -> None:
+    """Atomically write modules registry JSON to path."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def rebuild(flake_dir: str | Path) -> None:
+    """Run nixos-rebuild switch for the given flake directory."""
+    subprocess.run(
+        ["sudo", "nixos-rebuild", "switch", "--flake", str(flake_dir)],
+        check=True,
+    )
+
+
+def discover_inputs_from_lock(lock_path: str | Path) -> list[str]:
+    """Return sorted list of all input names from flake.lock, excluding 'root'."""
+    lock_path = Path(lock_path)
+    data = json.loads(lock_path.read_text())
+    nodes = data.get("nodes", {})
+    return sorted(k for k in nodes if k != "root")
+
+
+def get_module_view(modules_path: str | Path, lock_path: str | Path) -> list[dict]:
+    """Return a combined view of flake inputs and the module registry.
+
+    Rows have at minimum: name, status, source, type.
+    Status values: "enabled", "disabled", "unregistered", "missing".
+    Sorted: system entries first, then user entries, then unregistered — all alphabetical
+    within each group.
+    """
+    registry: dict = load_modules(modules_path)
+
+    lock_path = Path(lock_path)
+    lock_inputs: set[str] = set()
+    if lock_path.exists():
+        try:
+            lock_inputs = set(discover_inputs_from_lock(lock_path))
+        except Exception:
+            lock_inputs = set()
+
+    rows: list[dict] = []
+
+    # Inputs present in flake.lock
+    for inp in lock_inputs:
+        if inp in registry:
+            row = dict(registry[inp])
+            row["name"] = inp
+            row["status"] = "enabled" if registry[inp].get("enabled", False) else "disabled"
+        else:
+            row = {"name": inp, "status": "unregistered", "source": "", "type": "", "input": inp}
+        rows.append(row)
+
+    # Registry entries NOT in flake.lock (removed from flake.nix without going through nixstore)
+    for name, entry in registry.items():
+        if name not in lock_inputs:
+            row = dict(entry)
+            row["name"] = name
+            row["status"] = "missing"
+            rows.append(row)
+
+    def _sort_key(r: dict) -> tuple[int, str]:
+        status = r.get("status", "")
+        source = r.get("source", "")
+        if status == "unregistered":
+            order = 2
+        elif source == "system":
+            order = 0
+        else:
+            order = 1
+        return (order, r.get("name", ""))
+
+    rows.sort(key=_sort_key)
+    return rows
+
+
+def enable_module(name: str, modules_path: str | Path) -> None:
+    """Enable a module in the registry and rebuild NixOS."""
+    modules_path = Path(modules_path)
+    registry = load_modules(modules_path)
+    if name not in registry:
+        raise ValueError(f"Module '{name}' not found in registry ({modules_path})")
+    registry[name]["enabled"] = True
+    save_modules(modules_path, registry)
+    rebuild(modules_path.parent)
+
+
+def disable_module(name: str, modules_path: str | Path) -> None:
+    """Disable a module in the registry and rebuild NixOS."""
+    modules_path = Path(modules_path)
+    registry = load_modules(modules_path)
+    if name not in registry:
+        raise ValueError(f"Module '{name}' not found in registry ({modules_path})")
+    registry[name]["enabled"] = False
+    save_modules(modules_path, registry)
+    rebuild(modules_path.parent)
+
+
+def remove_module(
+    name: str,
+    modules_path: str | Path,
+    inputs_file_path: str | Path,
+) -> None:
+    """Remove a module from the registry and optionally from nixstore-inputs.nix.
+
+    Raises PermissionError for system modules.
+    Does NOT call rebuild() — caller must rebuild separately.
+    """
+    modules_path = Path(modules_path)
+    inputs_file_path = Path(inputs_file_path)
+    registry = load_modules(modules_path)
+    if name not in registry:
+        raise ValueError(f"Module '{name}' not found in registry ({modules_path})")
+    entry = registry[name]
+    if entry.get("source") == "system":
+        raise PermissionError(
+            "Cannot remove a system module. Edit modules.json manually if you are sure."
+        )
+
+    del registry[name]
+    save_modules(modules_path, registry)
+
+    # Remove from nixstore-inputs.nix if applicable
+    input_name = entry.get("input") if entry.get("type") == "flake-module" else None
+    if input_name and inputs_file_path.exists():
+        text = inputs_file_path.read_text()
+        new_text = text
+
+        # Remove simple `input.url = "...";` line
+        new_text = re.sub(
+            rf"^[^\S\n]*{re.escape(input_name)}\.url\s*=\s*\"[^\"]*\";\s*\n",
+            "",
+            new_text,
+            flags=re.MULTILINE,
+        )
+        # Remove block form `input = { ... };` (non-greedy, single block)
+        new_text = re.sub(
+            rf"^[^\S\n]*{re.escape(input_name)}\s*=\s*\{{[^}}]*\}};\s*\n",
+            "",
+            new_text,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+
+        if new_text == text:
+            raise ValueError(
+                f"Could not find input '{input_name}' in {inputs_file_path}. "
+                "Remove it manually from nixstore-inputs.nix."
+            )
+
+        tmp = inputs_file_path.with_suffix(inputs_file_path.suffix + ".tmp")
+        tmp.write_text(new_text)
+        os.replace(tmp, inputs_file_path)
+
+
+def register_input(
+    name: str,
+    modules_path: str | Path,
+    flake_dir: str | Path,
+) -> dict:
+    """Probe a flake input for nixosModules.default and register it in modules.json.
+
+    Raises ValueError if already registered or if the input doesn't expose
+    nixosModules.default.
+    """
+    modules_path = Path(modules_path)
+    flake_dir = Path(flake_dir)
+    registry = load_modules(modules_path)
+    if name in registry:
+        raise ValueError(f"Input '{name}' is already registered in {modules_path}")
+
+    result = subprocess.run(
+        [
+            "nix", "eval",
+            f".#inputs.{name}.nixosModules",
+            "--apply", "builtins.attrNames",
+        ],
+        cwd=str(flake_dir),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or "default" not in result.stdout:
+        raise ValueError(
+            f"This input does not expose nixosModules.default. "
+            f"Cannot register '{name}' as a module."
+        )
+
+    entry: dict = {
+        "source": "user",
+        "enabled": False,
+        "type": "flake-module",
+        "input": name,
+    }
+    registry[name] = entry
+    save_modules(modules_path, registry)
+    return entry
+
+
+def add_flake_module(
+    url: str,
+    modules_path: str | Path,
+    inputs_file_path: str | Path,
+    flake_dir: str | Path,
+    name: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
+    """Add a flake input, update flake.lock, and register it as a module.
+
+    Returns the registered name.
+    """
+    modules_path = Path(modules_path)
+    inputs_file_path = Path(inputs_file_path)
+    flake_dir = Path(flake_dir)
+
+    if name is None:
+        name = url.rstrip("/").rsplit("/", 1)[-1]
+
+    # Guard: duplicate in lock or registry
+    lock_path = flake_dir / "flake.lock"
+    if lock_path.exists():
+        if name in discover_inputs_from_lock(lock_path):
+            raise ValueError(
+                f"Input '{name}' already exists. Use --name to specify a different name."
+            )
+    registry = load_modules(modules_path)
+    if name in registry:
+        raise ValueError(
+            f"Input '{name}' already exists. Use --name to specify a different name."
+        )
+
+    # Write the new input line into nixstore-inputs.nix
+    orig_text = inputs_file_path.read_text() if inputs_file_path.exists() else "{\n}\n"
+    insert_line = f"  {name}.url = \"{url}\";"
+    last_brace = orig_text.rfind("}")
+    if last_brace == -1:
+        raise ValueError(
+            f"Could not find closing '}}' in {inputs_file_path}. Cannot insert input safely."
+        )
+    new_text = orig_text[:last_brace] + insert_line + "\n" + orig_text[last_brace:]
+    tmp = inputs_file_path.with_suffix(inputs_file_path.suffix + ".tmp")
+    tmp.write_text(new_text)
+    os.replace(tmp, inputs_file_path)
+
+    # Run `nix flake update <name>`, streaming output via progress_callback
+    try:
+        proc = subprocess.Popen(
+            ["nix", "flake", "update", name],
+            cwd=str(flake_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if progress_callback is not None:
+                progress_callback(line.rstrip("\n"))
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, ["nix", "flake", "update", name])
+    except Exception:
+        # Roll back the inputs file on failure
+        rollback_tmp = inputs_file_path.with_suffix(inputs_file_path.suffix + ".tmp")
+        rollback_tmp.write_text(orig_text)
+        os.replace(rollback_tmp, inputs_file_path)
+        raise
+
+    # Probe and register
+    register_input(name, modules_path, flake_dir)
+    return name
