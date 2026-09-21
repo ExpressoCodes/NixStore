@@ -274,7 +274,7 @@ def _check_flake_inputs(flake: Path) -> list[str]:
 
             result = subprocess.run(
                 ["nix", "flake", "update", "--flake", str(tmppath),
-                 "--option", "tarball-ttl", "0"],
+                 "--option", "tarball-ttl", "300"],
                 capture_output=True, text=True, timeout=180,
             )
             if result.returncode != 0:
