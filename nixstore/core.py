@@ -732,54 +732,63 @@ def add_flake_module(
     insert_line = f"    {name}.url = \"{url}\";\n"
     new_flake_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
 
-    # Build updated modules registry
-    new_registry = dict(registry)
-    new_registry[name] = {"source": "user", "enabled": False, "type": "flake-module", "input": name}
-    new_modules_text = json.dumps(new_registry, indent=2) + "\n"
-
-    # Write temp files as the current user (always writable)
-    tmp_new_flake = tmp_orig_flake = tmp_modules = ""
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".nix", delete=False) as f:
-            f.write(new_flake_text)
-            tmp_new_flake = f.name
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".nix", delete=False) as f:
-            f.write(orig_text)
-            tmp_orig_flake = f.name
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write(new_modules_text)
-            tmp_modules = f.name
-
-        # Single sudo authentication: install flake.nix, update lock, install modules.json.
-        # On nix flake update failure the script restores the original flake.nix before exiting.
-        script = (
-            f"install -m 644 '{tmp_new_flake}' '{flake_file_path}' && "
-            f"cd '{flake_dir}' && "
-            f"nix flake update {name} && "
-            f"install -m 644 '{tmp_modules}' '{modules_path}' "
-            f"|| (install -m 644 '{tmp_orig_flake}' '{flake_file_path}' 2>/dev/null; exit 1)"
-        )
+    # Run nix flake update as the current user in a temp dir so nix uses the
+    # normal user environment (cache, SSL, daemon access). Only the final file
+    # installs need sudo.
+    with tempfile.TemporaryDirectory(prefix="nixstore-add-") as tmpdir:
+        tmp = Path(tmpdir)
+        (tmp / "flake.nix").write_text(new_flake_text)
+        lock_src = flake_dir / "flake.lock"
+        if lock_src.exists():
+            shutil.copy(lock_src, tmp / "flake.lock")
 
         proc = subprocess.Popen(
+            ["nix", "flake", "update", name],
+            cwd=str(tmp),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if progress_callback is not None:
+                progress_callback(line.rstrip("\n"))
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, f"nix flake update {name}")
+
+        # Build updated modules registry
+        new_registry = dict(registry)
+        new_registry[name] = {
+            "source": "user", "enabled": False,
+            "type": "flake-module", "input": name,
+        }
+        (tmp / "modules.json").write_text(json.dumps(new_registry, indent=2) + "\n")
+
+        # Single sudo call: install updated flake.nix, flake.lock, and modules.json.
+        # Networking is done; sudo only copies already-computed files.
+        script = (
+            f"install -m 644 '{tmp}/flake.nix' '{flake_file_path}' && "
+            f"install -m 644 '{tmp}/flake.lock' '{flake_dir}/flake.lock' && "
+            f"install -m 644 '{tmp}/modules.json' '{modules_path}'"
+        )
+        sudo_proc = subprocess.Popen(
             ["sudo", "-S", "-p", "", "sh", "-c", script],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        assert proc.stdin is not None and proc.stdout is not None
+        assert sudo_proc.stdin is not None and sudo_proc.stdout is not None
         if password:
-            proc.stdin.write(password + "\n")
-        proc.stdin.close()
-        for line in proc.stdout:
+            sudo_proc.stdin.write(password + "\n")
+        sudo_proc.stdin.close()
+        for line in sudo_proc.stdout:
             if progress_callback is not None:
                 progress_callback(line.rstrip("\n"))
-        proc.wait()
-        if proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, f"sudo sh (add {name})")
-    finally:
-        for p in (tmp_new_flake, tmp_orig_flake, tmp_modules):
-            if p:
-                Path(p).unlink(missing_ok=True)
+        sudo_proc.wait()
+        if sudo_proc.returncode != 0:
+            raise subprocess.CalledProcessError(sudo_proc.returncode, f"sudo install (add {name})")
 
     return name
