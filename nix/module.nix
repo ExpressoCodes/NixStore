@@ -25,8 +25,23 @@ let
 
   initialFile = pkgs.writeText "nixstore-packages.json" (builtins.toJSON cfg.initialPackages + "\n");
 
+  # ── modules.json ─────────────────────────────────────────────────────────────
+  modulesData =
+    if cfg.modulesFile != null && builtins.pathExists cfg.modulesFile
+    then lib.importJSON cfg.modulesFile
+    else { };
+
+  enabledEntries = lib.attrValues (
+    lib.filterAttrs (_: m: m.enabled or false) modulesData
+  );
+
+  flakeEntries  = builtins.filter (m: (m.type or "") == "flake-module")    enabledEntries;
+  optionEntries = builtins.filter (m: (m.type or "") == "program-option")  enabledEntries;
+
 in
 {
+  imports = map (m: inputs.${m.input}.nixosModules.default) flakeEntries;
+
   options.programs.nixstore = {
     enable = mkEnableOption "NixStore, a TUI to search, install and remove packages";
 
@@ -145,6 +160,16 @@ in
         fi
       '';
     })
-
-  ];
+  ]
+  ++ map (m:
+    let
+      path       = lib.splitString "." m.option;
+      parentPath = lib.init path;
+      extras     = m.extras or { };
+    in
+      lib.mkMerge [
+        (lib.setAttrByPath path true)
+        (lib.optionalAttrs (extras != { }) (lib.setAttrByPath parentPath extras))
+      ]
+  ) optionEntries;
 }
