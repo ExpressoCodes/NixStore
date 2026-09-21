@@ -626,13 +626,17 @@ def remove_module(
 def remove_unregistered_input(name: str, flake_file_path: str | Path, password: str = "") -> None:
     """Remove a flake input that is in flake.lock but not in the registry.
 
-    Strips the `<name>.url = "...";` line from flake.nix so the input is
-    dropped from flake.lock on the next rebuild. Does NOT call rebuild().
+    Strips the `<name>.url = "...";` line, any preceding comment line, and
+    the `<name>,` line from the outputs destructuring from flake.nix so the
+    input is fully dropped on the next rebuild. Does NOT call rebuild().
     """
     flake_file_path = Path(flake_file_path)
     text = flake_file_path.read_text()
+    escaped = re.escape(name)
+
+    # Remove the .url = "..."; line (required — fail if missing)
     new_text = re.sub(
-        rf"^[^\S\n]*{re.escape(name)}\.url\s*=\s*\"[^\"]*\";\s*\n",
+        rf"^[^\S\n]*{escaped}\.url\s*=\s*\"[^\"]*\";\s*\n",
         "",
         text,
         flags=re.MULTILINE,
@@ -642,6 +646,23 @@ def remove_unregistered_input(name: str, flake_file_path: str | Path, password: 
             f"Could not find '{name}.url = ...' in {flake_file_path}. "
             "Remove it manually from flake.nix."
         )
+
+    # Remove the preceding comment line (e.g. `    # uxplay ────`) — best-effort
+    new_text = re.sub(
+        rf"^[^\S\n]*#\s*{escaped}\s*─*\s*\n",
+        "",
+        new_text,
+        flags=re.MULTILINE,
+    )
+
+    # Remove the `<name>,  # ...` line from the outputs destructuring — best-effort
+    new_text = re.sub(
+        rf"^[^\S\n]*{escaped},\s*(?:#[^\n]*)?\n",
+        "",
+        new_text,
+        flags=re.MULTILINE,
+    )
+
     _sudo_write(flake_file_path, new_text, password)
 
 
