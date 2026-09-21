@@ -879,10 +879,386 @@ class FlatpakPackagesPanel(Vertical):
         tabs.active = "finstalled" if tabs.active == "fsearch" else "fsearch"
 
 
+# ── modules panel ──────────────────────────────────────────────────────────────
+
+
+class ModuleTable(DataTable):
+    """Focusable row-cursor table for the Modules panel."""
+
+    BINDINGS = [
+        Binding("space", "toggle_mod", "Toggle"),
+        Binding("a", "add_url", "Add URL"),
+        Binding("d", "remove_mod", "Remove"),
+        Binding("r", "register_mod", "Register"),
+    ]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(cursor_type="row", zebra_stripes=True, **kwargs)
+        self.add_column(" ", key="status", width=3)
+        self.add_column("Module", key="name")
+        self.add_column("", key="badges", width=22)
+
+    def highlighted_name(self) -> str | None:
+        if not self.row_count:
+            return None
+        return self.coordinate_to_cell_key(self.cursor_coordinate).row_key.value
+
+    def _panel(self) -> "ModulesPanel | None":
+        for node in self.ancestors:
+            if isinstance(node, ModulesPanel):
+                return node
+        return None
+
+    def action_toggle_mod(self) -> None:
+        if (p := self._panel()) is not None:
+            p.action_toggle()
+
+    def action_add_url(self) -> None:
+        if (p := self._panel()) is not None:
+            p.action_add()
+
+    def action_remove_mod(self) -> None:
+        if (p := self._panel()) is not None:
+            p.action_remove()
+
+    def action_register_mod(self) -> None:
+        if (p := self._panel()) is not None:
+            p.action_register()
+
+
+class ModulesPanel(Vertical):
+    """Browse, toggle, add and remove NixOS flake modules."""
+
+    def __init__(self, cfg: Config, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cfg = cfg
+        self._modules: list[dict] = []
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        yield ModuleTable(id="mod-table")
+        yield Static(id="mod-details")
+        yield Input(
+            placeholder="Flake URL to add, e.g. github:Org/repo — Enter to confirm, Esc to cancel",
+            id="mod-add-input",
+        )
+        yield RichLog(id="mod-log", wrap=True, markup=False)
+        yield Label("", id="mod-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#mod-add-input").display = False
+        self.query_one("#mod-log").display = False
+        self.load_modules()
+
+    def on_show(self) -> None:
+        try:
+            self.query_one(ModuleTable).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- data -----------------------------------------------------------------
+
+    @work(exclusive=True, group="mod-load")
+    async def load_modules(self) -> None:
+        table = self.query_one(ModuleTable)
+        table.loading = True
+        try:
+            lock_path = self.cfg.flake / "flake.lock"
+            self._modules = await asyncio.to_thread(
+                core.get_module_view, self.cfg.modules_file, lock_path
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set_footer(f"Could not load modules: {exc}", "bold red")
+            return
+        finally:
+            table.loading = False
+        self._fill_table()
+        table.focus()
+
+    def _fill_table(self) -> None:
+        table = self.query_one(ModuleTable)
+        keep = table.highlighted_name()
+        table.clear()
+        for mod in self._modules:
+            table.add_row(
+                self._status_cell(mod),
+                Text(mod["name"], "bold"),
+                self._badges_cell(mod),
+                key=mod["name"],
+            )
+        names = [m["name"] for m in self._modules]
+        table.move_cursor(row=names.index(keep) if keep in names else 0)
+        self._show_details()
+
+    # --- rendering ------------------------------------------------------------
+
+    def _status_cell(self, mod: dict) -> Text:
+        status = mod.get("status", "")
+        if status == "enabled":
+            return Text("●", "bold green")
+        if status == "disabled":
+            return Text("●", "bold red")
+        if status == "missing":
+            return Text("⚠", "bold yellow")
+        return Text("●", "dim")  # unregistered
+
+    def _badges_cell(self, mod: dict) -> Text:
+        t = Text()
+        source = mod.get("source", "")
+        mod_type = mod.get("type", "")
+        if source == "system":
+            t.append("[system]", "dim purple")
+        elif source == "user":
+            t.append("[user]", "cyan")
+        if mod_type == "flake-module":
+            if t.plain:
+                t.append(" ")
+            t.append("[flake]", "green")
+        elif mod_type == "program-option":
+            if t.plain:
+                t.append(" ")
+            t.append("[prog]", "dark_orange")
+        return t
+
+    def _show_details(self) -> None:
+        name = self.query_one(ModuleTable).highlighted_name()
+        mod = next((m for m in self._modules if m["name"] == name), None) if name else None
+        if mod is None:
+            self.query_one("#mod-details", Static).update("")
+            return
+        status = mod.get("status", "")
+        t = Text()
+        if status == "unregistered":
+            t.append("found in flake.lock — not registered", "dim")
+        elif status == "missing":
+            t.append("in registry but not found in flake.lock", "dim yellow")
+        else:
+            url = mod.get("url") or mod.get("input")
+            option = mod.get("option")
+            if url:
+                t.append(str(url), "dim")
+            elif option:
+                t.append(str(option), "dim")
+        hint = self._hint(mod)
+        if hint:
+            if t.plain:
+                t.append("  ")
+            t.append(hint, "dim italic")
+        self.query_one("#mod-details", Static).update(t)
+
+    def _hint(self, mod: dict) -> str:
+        status = mod.get("status", "")
+        source = mod.get("source", "")
+        if status in ("enabled", "disabled"):
+            return "Space: toggle  d: remove" if source == "user" else "Space: toggle"
+        if status == "unregistered":
+            return "r: register"
+        if status == "missing":
+            return "d: remove from registry"
+        return ""
+
+    def _set_footer(self, text: str, style: str = "") -> None:
+        self.query_one("#mod-footer", Label).update(Text(text, style))
+
+    # --- actions --------------------------------------------------------------
+
+    def action_toggle(self) -> None:
+        if self._busy:
+            self.notify("Busy — please wait.", severity="warning")
+            return
+        name = self.query_one(ModuleTable).highlighted_name()
+        if name is None:
+            return
+        mod = next((m for m in self._modules if m["name"] == name), None)
+        if mod is None:
+            return
+        status = mod.get("status", "")
+        if status == "enabled":
+            self._run_toggle(name, enable=False)
+        elif status == "disabled":
+            self._run_toggle(name, enable=True)
+        else:
+            self.notify("Only registered, non-missing modules can be toggled.", severity="warning")
+
+    @work(exclusive=True, group="mod-toggle")
+    async def _run_toggle(self, name: str, enable: bool) -> None:
+        self._busy = True
+        verb = "Enabling" if enable else "Disabling"
+        self._set_footer(f"{verb} {name}… (rebuilding NixOS, please wait)", "bold yellow")
+        try:
+            if enable:
+                await asyncio.to_thread(core.enable_module, name, self.cfg.modules_file)
+            else:
+                await asyncio.to_thread(core.disable_module, name, self.cfg.modules_file)
+            self.notify(
+                f"{'Enabled' if enable else 'Disabled'} '{name}' — NixOS rebuilt.",
+                severity="information",
+            )
+            self._set_footer("")
+        except Exception as exc:  # noqa: BLE001
+            self.notify(str(exc), severity="error")
+            self._set_footer(str(exc), "bold red")
+        finally:
+            self._busy = False
+        self.load_modules()
+
+    def action_add(self) -> None:
+        if self._busy:
+            self.notify("Busy — please wait.", severity="warning")
+            return
+        log = self.query_one("#mod-log", RichLog)
+        log.clear()
+        log.display = False
+        inp = self.query_one("#mod-add-input", Input)
+        inp.value = ""
+        inp.display = True
+        inp.focus()
+        self._set_footer("Enter a flake URL and press Enter, or Esc to cancel.")
+
+    def action_remove(self) -> None:
+        if self._busy:
+            self.notify("Busy — please wait.", severity="warning")
+            return
+        name = self.query_one(ModuleTable).highlighted_name()
+        if name is None:
+            return
+        mod = next((m for m in self._modules if m["name"] == name), None)
+        if mod is None:
+            return
+        status = mod.get("status", "")
+        source = mod.get("source", "")
+        if status == "unregistered":
+            self.notify("Unregistered inputs are not in the registry — nothing to remove.", severity="warning")
+            return
+        if source == "system":
+            self.notify("System modules cannot be removed.", severity="warning")
+            return
+        try:
+            core.remove_module(name, self.cfg.modules_file, self.cfg.inputs_file)
+            self.notify(
+                f"Removed '{name}'. Run nixos-rebuild to apply.",
+                severity="information",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.notify(str(exc), severity="error")
+        self.load_modules()
+
+    def action_register(self) -> None:
+        if self._busy:
+            self.notify("Busy — please wait.", severity="warning")
+            return
+        name = self.query_one(ModuleTable).highlighted_name()
+        if name is None:
+            return
+        mod = next((m for m in self._modules if m["name"] == name), None)
+        if mod is None:
+            return
+        if mod.get("status") != "unregistered":
+            self.notify("Only unregistered inputs can be registered.", severity="warning")
+            return
+        self._run_register(name)
+
+    @work(exclusive=True, group="mod-register")
+    async def _run_register(self, name: str) -> None:
+        self._busy = True
+        self._set_footer(f"Registering '{name}'…", "bold yellow")
+        try:
+            await asyncio.to_thread(
+                core.register_input, name, self.cfg.modules_file, self.cfg.flake
+            )
+            self.notify(f"Registered '{name}'.", severity="information")
+            self._set_footer("")
+        except Exception as exc:  # noqa: BLE001
+            self.notify(str(exc), severity="error")
+            self._set_footer(str(exc), "bold red")
+        finally:
+            self._busy = False
+        self.load_modules()
+
+    @on(Input.Submitted, "#mod-add-input")
+    def add_input_submitted(self, event: Input.Submitted) -> None:
+        url = event.value.strip()
+        if not url:
+            self.clear_active_input()
+            return
+        self.query_one("#mod-add-input", Input).display = False
+        log = self.query_one("#mod-log", RichLog)
+        log.display = True
+        self._run_add(url)
+
+    @work(exclusive=True, group="mod-add")
+    async def _run_add(self, url: str) -> None:
+        self._busy = True
+        log = self.query_one("#mod-log", RichLog)
+        self._set_footer(f"Adding {url}… (running nix flake update, please wait)", "bold yellow")
+
+        def progress(line: str) -> None:
+            self.app.call_from_thread(log.write, Text.from_ansi(line))
+
+        try:
+            name = await asyncio.to_thread(
+                core.add_flake_module,
+                url,
+                self.cfg.modules_file,
+                self.cfg.inputs_file,
+                self.cfg.flake,
+                None,
+                progress,
+            )
+            self.notify(f"Added module '{name}'.", severity="information")
+            self._set_footer(f"✓ Added '{name}'.", "bold green")
+        except Exception as exc:  # noqa: BLE001
+            self.notify(str(exc), severity="error")
+            self._set_footer(str(exc), "bold red")
+        finally:
+            self._busy = False
+            try:
+                self.query_one("#mod-log").display = False
+            except Exception:  # noqa: BLE001
+                pass
+        self.load_modules()
+
+    @on(DataTable.RowHighlighted)
+    def row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        try:
+            if event.data_table is self.query_one(ModuleTable):
+                self._show_details()
+        except Exception:  # noqa: BLE001
+            pass
+
+    @on(DataTable.RowSelected)
+    def row_selected(self, _: DataTable.RowSelected) -> None:
+        self.action_toggle()
+
+    # --- interface for NixStore app -------------------------------------------
+
+    def has_pending(self) -> bool:
+        return False
+
+    def clear_active_input(self) -> bool:
+        inp = self.query_one("#mod-add-input", Input)
+        if inp.display:
+            inp.display = False
+            inp.value = ""
+            self._set_footer("")
+            try:
+                self.query_one(ModuleTable).focus()
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        return False
+
+    def action_next_tab(self) -> None:
+        pass  # no tabs in modules panel
+
+    def action_apply(self) -> None:
+        pass  # no pending changes in modules panel
+
+
 # ── sidebar ────────────────────────────────────────────────────────────────────
 
-_NAV_PANELS = ["panel-nix", "panel-flatpak", "panel-system"]
-_NAV_LABELS = ["  Nix Packages", "  Flatpaks", "⟳  System Update"]
+_NAV_PANELS = ["panel-nix", "panel-flatpak", "panel-modules", "panel-system"]
+_NAV_LABELS = ["  Nix Packages", "  Flatpaks", "  Modules", "⟳  System Update"]
 
 
 class Sidebar(Vertical):
@@ -967,6 +1343,13 @@ class NixStore(App):
     #nix-details, #fp-details { height: 5; border: round $primary-darken-2; padding: 0 1; }
     #nix-pending, #fp-pending { height: 1; padding: 0 1; background: $boost; }
 
+    /* ── modules panel ── */
+    ModulesPanel { padding: 0 1; }
+    ModuleTable { height: 1fr; }
+    #mod-details { height: 3; border: round $primary-darken-2; padding: 0 1; }
+    #mod-log { height: 8; border: round $primary-darken-2; }
+    #mod-footer { height: 1; padding: 0 1; background: $boost; }
+
     /* ── modals ── */
     ApplyScreen, FlatpakApplyScreen { align: center middle; }
     #dialog {
@@ -1002,6 +1385,7 @@ class NixStore(App):
                 yield SystemUpdatePanel(cfg=self.cfg, id="panel-system")
                 yield NixPackagesPanel(id="panel-nix", cfg=self.cfg)
                 yield FlatpakPackagesPanel(id="panel-flatpak")
+                yield ModulesPanel(cfg=self.cfg, id="panel-modules")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1013,12 +1397,14 @@ class NixStore(App):
         # select the Nix Packages item in the sidebar (index 0)
         self.query_one("#nav", ListView).index = 0
 
-    def _active_panel(self) -> NixPackagesPanel | FlatpakPackagesPanel | None:
+    def _active_panel(self) -> NixPackagesPanel | FlatpakPackagesPanel | ModulesPanel | None:
         current = self.query_one(ContentSwitcher).current
         if current == "panel-nix":
             return self.query_one(NixPackagesPanel)
         if current == "panel-flatpak":
             return self.query_one(FlatpakPackagesPanel)
+        if current == "panel-modules":
+            return self.query_one(ModulesPanel)
         return None
 
     def action_apply(self) -> None:

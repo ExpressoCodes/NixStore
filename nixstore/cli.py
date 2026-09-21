@@ -101,6 +101,135 @@ def cmd_remove(cfg: Config, args: argparse.Namespace) -> int:
     return apply(cfg, installed - set(args.packages), "Removed " + ", ".join(args.packages))
 
 
+# --- module subcommands -------------------------------------------------------
+
+_STATUS_COLOR = {
+    "enabled": GREEN,
+    "disabled": DIM,
+    "unregistered": YELLOW,
+    "missing": RED,
+}
+
+
+def cmd_module_list(cfg: Config, args: argparse.Namespace) -> int:
+    rows = core.get_module_view(cfg.modules_file, cfg.flake / "flake.lock")
+    if not rows:
+        print(f"{DIM}No modules found.{RESET}")
+        return 0
+    width = shutil.get_terminal_size((120, 20)).columns
+    name_w = min(max((len(r.get("name", "")) for r in rows), default=0), 30)
+    status_w = 12
+    source_w = 8
+    type_w = 14
+    header = (
+        f"{'Name':<{name_w}}  {'Status':<{status_w}}  {'Source':<{source_w}}"
+        f"  {'Type':<{type_w}}  URL/Option"
+    )
+    print(f"{BOLD}{header}{RESET}")
+    print("-" * min(len(header) + 20, width))
+    for r in rows:
+        status = r.get("status", "")
+        color = _STATUS_COLOR.get(status, "")
+        url_or_opt = r.get("url") or r.get("option") or r.get("input") or ""
+        line = (
+            f"{r.get('name', ''):<{name_w}}  "
+            f"{color}{status:<{status_w}}{RESET}  "
+            f"{r.get('source', ''):<{source_w}}  "
+            f"{r.get('type', ''):<{type_w}}  "
+            f"{url_or_opt}"
+        )
+        print(line[: width])
+    return 0
+
+
+def cmd_module_enable(cfg: Config, args: argparse.Namespace) -> int:
+    try:
+        core.enable_module(args.name, cfg.modules_file)
+        print(f"{GREEN}✓{RESET} Module '{args.name}' enabled and system rebuilt.")
+        return 0
+    except ValueError as exc:
+        err(str(exc))
+        return 1
+    except subprocess.CalledProcessError:
+        err("nixos-rebuild failed. The module was enabled in modules.json but the rebuild did not succeed.")
+        return 1
+
+
+def cmd_module_disable(cfg: Config, args: argparse.Namespace) -> int:
+    try:
+        core.disable_module(args.name, cfg.modules_file)
+        print(f"{GREEN}✓{RESET} Module '{args.name}' disabled and system rebuilt.")
+        return 0
+    except ValueError as exc:
+        err(str(exc))
+        return 1
+    except subprocess.CalledProcessError:
+        err("nixos-rebuild failed. The module was disabled in modules.json but the rebuild did not succeed.")
+        return 1
+
+
+def cmd_module_add(cfg: Config, args: argparse.Namespace) -> int:
+    def _print_line(line: str) -> None:
+        print(line)
+
+    try:
+        name = core.add_flake_module(
+            url=args.url,
+            modules_path=cfg.modules_file,
+            inputs_file_path=cfg.inputs_file,
+            flake_dir=cfg.flake,
+            name=args.name,
+            progress_callback=_print_line,
+        )
+        print(f"\n{GREEN}✓{RESET} Registered '{name}' (enabled=false). Use 'nixstore module enable {name}' to activate.")
+        return 0
+    except ValueError as exc:
+        err(str(exc))
+        return 1
+    except subprocess.CalledProcessError as exc:
+        err(f"nix flake update failed (exit {exc.returncode}).")
+        return 1
+
+
+def cmd_module_remove(cfg: Config, args: argparse.Namespace) -> int:
+    try:
+        core.remove_module(args.name, cfg.modules_file, cfg.inputs_file)
+        print(f"{GREEN}✓{RESET} Module '{args.name}' removed from registry.")
+        print(f"{YELLOW}!{RESET} Run 'sudo nixos-rebuild switch --flake {cfg.flake}' to apply.")
+        return 0
+    except PermissionError as exc:
+        err(str(exc))
+        return 1
+    except ValueError as exc:
+        err(str(exc))
+        return 1
+
+
+def cmd_module_register(cfg: Config, args: argparse.Namespace) -> int:
+    try:
+        entry = core.register_input(args.name, cfg.modules_file, cfg.flake)
+        print(f"{GREEN}✓{RESET} Registered '{args.name}': {entry}")
+        return 0
+    except ValueError as exc:
+        err(str(exc))
+        return 1
+
+
+def cmd_module(cfg: Config, args: argparse.Namespace) -> int:
+    module_commands = {
+        "list": cmd_module_list,
+        "enable": cmd_module_enable,
+        "disable": cmd_module_disable,
+        "add": cmd_module_add,
+        "remove": cmd_module_remove,
+        "register": cmd_module_register,
+    }
+    if args.module_command is None:
+        err("a module subcommand is required. Try 'nixstore module --help'.")
+        return 1
+    return module_commands[args.module_command](cfg, args)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="nixstore",
@@ -121,6 +250,28 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("packages", nargs="+", metavar="package")
     sub.add_parser("list", help="list packages installed with nixstore")
 
+    # module subcommand group
+    mod = sub.add_parser("module", help="manage NixOS modules from flake inputs")
+    mod_sub = mod.add_subparsers(dest="module_command", metavar="module_command")
+
+    mod_sub.add_parser("list", help="show all modules (registered + unregistered from flake.lock)")
+
+    p = mod_sub.add_parser("enable", help="enable a module and rebuild")
+    p.add_argument("name")
+
+    p = mod_sub.add_parser("disable", help="disable a module and rebuild")
+    p.add_argument("name")
+
+    p = mod_sub.add_parser("add", help="add a flake input URL and register it as a module")
+    p.add_argument("url")
+    p.add_argument("--name", dest="name", default=None, help="override the derived input name")
+
+    p = mod_sub.add_parser("remove", help="remove a module from the registry (rebuild separately)")
+    p.add_argument("name")
+
+    p = mod_sub.add_parser("register", help="register an already-locked flake input as a module")
+    p.add_argument("name")
+
     args = parser.parse_args(argv)
     cfg = Config.from_env(args.flake)
 
@@ -129,7 +280,13 @@ def main(argv: list[str] | None = None) -> int:
 
         tui.run(cfg, " ".join(getattr(args, "query", [])))
         return 0
-    commands = {"search": cmd_search, "list": cmd_list, "install": cmd_install, "remove": cmd_remove}
+    commands = {
+        "search": cmd_search,
+        "list": cmd_list,
+        "install": cmd_install,
+        "remove": cmd_remove,
+        "module": cmd_module,
+    }
     try:
         return commands[args.command](cfg, args)
     except KeyboardInterrupt:
