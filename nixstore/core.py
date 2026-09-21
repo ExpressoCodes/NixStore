@@ -873,3 +873,32 @@ def add_flake_module(
             raise subprocess.CalledProcessError(sudo_proc.returncode, f"sudo install (add {name})")
 
     return name
+
+
+def toggle_module_registry(name: str, enable: bool, modules_path: Path, password: str = "") -> None:
+    """Update a module's enabled flag in the registry without rebuilding."""
+    modules_path = Path(modules_path)
+    registry = load_modules(modules_path)
+    if name not in registry:
+        raise ValueError(f"Module '{name}' not found in registry ({modules_path})")
+    registry[name]["enabled"] = enable
+    content = json.dumps(registry, indent=2) + "\n"
+    _sudo_write(modules_path, content, password)
+
+
+async def rebuild_stream(flake_dir: Path, password: str, log_cb) -> bool:  # noqa: ANN001
+    """Run nixos-rebuild switch streaming output to log_cb. Returns True on success."""
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-S", "-p", "", "nixos-rebuild", "switch", "--flake", str(flake_dir),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    proc.stdin.write((password + "\n").encode())
+    await proc.stdin.drain()
+    proc.stdin.close()
+    async for raw in proc.stdout:
+        log_cb(raw.decode(errors="replace").rstrip("\n"))
+    await proc.wait()
+    return proc.returncode == 0

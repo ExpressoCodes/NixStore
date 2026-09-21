@@ -867,6 +867,182 @@ class FlatpakPackagesPanel(Vertical):
 # ── modules panel ──────────────────────────────────────────────────────────────
 
 
+class ModuleToggleScreen(ModalScreen[bool]):
+    """Modal to enable or disable a NixOS flake module with a nixos-rebuild."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, cfg: Config, name: str, enable: bool) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.name = name
+        self.enable = enable
+        self.running = False
+        self.succeeded = False
+
+    def compose(self) -> ComposeResult:
+        verb = "Install" if self.enable else "Uninstall"
+        with Vertical(id="dialog"):
+            yield Label(f"{verb} {self.name}", id="dialog-title")
+            yield Input(password=True, placeholder="sudo password", id="password")
+            yield RichLog(id="log", wrap=True, markup=False)
+            yield Label("Enter sudo password and press Enter · Esc: cancel", id="status")
+
+    def on_mount(self) -> None:
+        self.query_one("#log").display = False
+        self.query_one("#password").focus()
+
+    def set_status(self, text: str, style: str = "") -> None:
+        self.query_one("#status", Label).update(Text(text, style=style))
+
+    def action_close(self) -> None:
+        if not self.running:
+            self.dismiss(self.succeeded)
+
+    @on(Input.Submitted, "#password")
+    def submitted(self, event: Input.Submitted) -> None:
+        if not self.running and not self.succeeded:
+            password = event.value
+            event.input.value = ""
+            self.run_toggle(password)
+
+    @work(exclusive=True)
+    async def run_toggle(self, password: str) -> None:
+        self.running = True
+        pw_input = self.query_one("#password", Input)
+        log = self.query_one("#log", RichLog)
+        try:
+            self.set_status("Checking password…")
+            check = await asyncio.create_subprocess_exec(
+                "sudo", "-S", "-k", "-v", "-p", "",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await check.communicate((password + "\n").encode())
+            if check.returncode != 0:
+                self.set_status("Wrong password — try again · Esc: cancel", "bold red")
+                pw_input.focus()
+                return
+
+            pw_input.display = False
+            log.display = True
+            verb = "Installing" if self.enable else "Uninstalling"
+            self.set_status(f"{verb}… (rebuilding NixOS, please wait)", "bold yellow")
+
+            await asyncio.to_thread(
+                core.toggle_module_registry, self.name, self.enable,
+                self.cfg.modules_file, password
+            )
+
+            def log_cb(line: str) -> None:
+                log.write(Text.from_ansi(line))
+
+            ok = await core.rebuild_stream(self.cfg.flake, password, log_cb)
+            del password
+
+            verb_done = "Installed" if self.enable else "Uninstalled"
+            if ok:
+                self.succeeded = True
+                self.set_status(f"✓ {verb_done} '{self.name}' — Esc: back", "bold green")
+                core.notify("Module updated", self.name)
+            else:
+                self.set_status(
+                    f"✗ Rebuild failed — module registry was updated · Esc: back",
+                    "bold red",
+                )
+                core.notify("Module rebuild failed", self.name, "critical")
+        finally:
+            self.running = False
+
+
+class ModuleAddScreen(ModalScreen[bool]):
+    """Modal to add a flake URL as a module (nix flake update + sudo install)."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, cfg: Config, url: str) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.url = url
+        self.running = False
+        self.succeeded = False
+        self._added_name: str = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Add flake module", id="dialog-title")
+            yield Static(Text(self.url, "dim"), id="changes")
+            yield Input(password=True, placeholder="sudo password", id="password")
+            yield RichLog(id="log", wrap=True, markup=False)
+            yield Label("Enter sudo password and press Enter · Esc: cancel", id="status")
+
+    def on_mount(self) -> None:
+        self.query_one("#log").display = False
+        self.query_one("#password").focus()
+
+    def set_status(self, text: str, style: str = "") -> None:
+        self.query_one("#status", Label).update(Text(text, style=style))
+
+    def action_close(self) -> None:
+        if not self.running:
+            self.dismiss(self.succeeded)
+
+    @on(Input.Submitted, "#password")
+    def submitted(self, event: Input.Submitted) -> None:
+        if not self.running and not self.succeeded:
+            password = event.value
+            event.input.value = ""
+            self.run_add(password)
+
+    @work(exclusive=True)
+    async def run_add(self, password: str) -> None:
+        self.running = True
+        pw_input = self.query_one("#password", Input)
+        log = self.query_one("#log", RichLog)
+        try:
+            self.set_status("Checking password…")
+            check = await asyncio.create_subprocess_exec(
+                "sudo", "-S", "-k", "-v", "-p", "",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await check.communicate((password + "\n").encode())
+            if check.returncode != 0:
+                self.set_status("Wrong password — try again · Esc: cancel", "bold red")
+                pw_input.focus()
+                return
+
+            pw_input.display = False
+            log.display = True
+            self.set_status("Adding flake module… (running nix flake update, please wait)", "bold yellow")
+
+            def progress(line: str) -> None:
+                self.app.call_from_thread(log.write, Text.from_ansi(line))
+
+            name = await asyncio.to_thread(
+                core.add_flake_module,
+                self.url,
+                self.cfg.modules_file,
+                self.cfg.flake_file,
+                self.cfg.flake,
+                None,
+                progress,
+                password,
+            )
+            del password
+            self._added_name = name
+            self.succeeded = True
+            self.set_status(f"✓ Added '{name}' — Esc: back", "bold green")
+            core.notify("Flake module added", name)
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"✗ {exc} · Esc: back", "bold red")
+            core.notify("Add module failed", str(exc), "critical")
+        finally:
+            self.running = False
+
+
 class ModuleTable(DataTable):
     """Focusable row-cursor table for the Modules panel."""
 
@@ -937,13 +1113,11 @@ class ModulesPanel(Vertical):
             placeholder="sudo password — Enter to confirm, Esc to cancel",
             id="mod-sudo-input",
         )
-        yield RichLog(id="mod-log", wrap=True, markup=False)
         yield Label("", id="mod-footer")
 
     def on_mount(self) -> None:
         self.query_one("#mod-add-input").display = False
         self.query_one("#mod-sudo-input").display = False
-        self.query_one("#mod-log").display = False
         self.load_modules()
 
     def on_show(self) -> None:
@@ -1091,35 +1265,26 @@ class ModulesPanel(Vertical):
             return
         self._run_toggle(mod["name"], enable=False)
 
-    @work(exclusive=True, group="mod-toggle")
-    async def _run_toggle(self, name: str, enable: bool) -> None:
+    def _run_toggle(self, name: str, enable: bool) -> None:
         self._busy = True
-        verb = "Installing" if enable else "Uninstalling"
-        self._set_footer(f"{verb} {name}… (rebuilding NixOS, please wait)", "bold yellow")
-        try:
-            if enable:
-                await asyncio.to_thread(core.enable_module, name, self.cfg.modules_file)
-            else:
-                await asyncio.to_thread(core.disable_module, name, self.cfg.modules_file)
-            self.notify(
-                f"{'Installed' if enable else 'Uninstalled'} '{name}' — NixOS rebuilt.",
-                severity="information",
-            )
-            self._set_footer("")
-        except Exception as exc:  # noqa: BLE001
-            self.notify(str(exc), severity="error")
-            self._set_footer(str(exc), "bold red")
-        finally:
+        def done(succeeded: bool | None) -> None:
             self._busy = False
-        self.load_modules()
+            if succeeded:
+                self.notify(
+                    f"{'Installed' if enable else 'Uninstalled'} '{name}'.",
+                    severity="information",
+                )
+            self.load_modules()
+            try:
+                self.query_one(ModuleTable).focus()
+            except Exception:  # noqa: BLE001
+                pass
+        self.app.push_screen(ModuleToggleScreen(self.cfg, name, enable), done)
 
     def action_add(self) -> None:
         if self._busy:
             self.notify("Busy — please wait.", severity="warning")
             return
-        log = self.query_one("#mod-log", RichLog)
-        log.clear()
-        log.display = False
         inp = self.query_one("#mod-add-input", Input)
         inp.value = ""
         inp.display = True
@@ -1209,16 +1374,26 @@ class ModulesPanel(Vertical):
     @on(Input.Submitted, "#mod-add-input")
     def add_input_submitted(self, event: Input.Submitted) -> None:
         url = event.value.strip()
+        inp = self.query_one("#mod-add-input", Input)
+        inp.display = False
+        inp.value = ""
         if not url:
-            self.clear_active_input()
+            self._set_footer("")
+            try:
+                self.query_one(ModuleTable).focus()
+            except Exception:  # noqa: BLE001
+                pass
             return
-        self._pending_url = url
-        self.query_one("#mod-add-input", Input).display = False
-        pw = self.query_one("#mod-sudo-input", Input)
-        pw.value = ""
-        pw.display = True
-        pw.focus()
-        self._set_footer("Enter sudo password to continue.")
+        self._set_footer("")
+        def done(succeeded: bool | None) -> None:
+            self._busy = False
+            self.load_modules()
+            try:
+                self.query_one(ModuleTable).focus()
+            except Exception:  # noqa: BLE001
+                pass
+        self._busy = True
+        self.app.push_screen(ModuleAddScreen(self.cfg, url), done)
 
     @on(Input.Submitted, "#mod-sudo-input")
     def sudo_input_submitted(self, event: Input.Submitted) -> None:
@@ -1229,50 +1404,6 @@ class ModulesPanel(Vertical):
         if delete_name:
             self._pending_delete = ""
             self._run_remove(delete_name, password)
-            return
-        url = getattr(self, "_pending_url", "")
-        if not url:
-            return
-        log = self.query_one("#mod-log", RichLog)
-        log.clear()
-        log.display = True
-        self._run_add(url, password)
-
-    @work(exclusive=True, group="mod-add")
-    async def _run_add(self, url: str, password: str = "") -> None:
-        self._busy = True
-        log = self.query_one("#mod-log", RichLog)
-        self._set_footer(f"Adding {url}… (running nix flake update, please wait)", "bold yellow")
-
-        def progress(line: str) -> None:
-            self.app.call_from_thread(log.write, Text.from_ansi(line))
-
-        succeeded = False
-        try:
-            name = await asyncio.to_thread(
-                core.add_flake_module,
-                url,
-                self.cfg.modules_file,
-                self.cfg.flake_file,
-                self.cfg.flake,
-                None,
-                progress,
-                password,
-            )
-            succeeded = True
-            self.notify(f"Added module '{name}'.", severity="information")
-            self._set_footer(f"✓ Added '{name}'. Esc to close log.", "bold green")
-        except Exception as exc:  # noqa: BLE001
-            self.notify(str(exc), severity="error")
-            self._set_footer(f"✗ {exc}  (see log above · Esc to close)", "bold red")
-        finally:
-            self._busy = False
-            if succeeded:
-                try:
-                    self.query_one("#mod-log").display = False
-                except Exception:  # noqa: BLE001
-                    pass
-        self.load_modules()
 
     @on(DataTable.RowHighlighted)
     def row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -1303,7 +1434,6 @@ class ModulesPanel(Vertical):
         if pw.display:
             pw.display = False
             pw.value = ""
-            self._pending_url = ""
             self._pending_delete = ""
             self._set_footer("")
             try:
@@ -1314,7 +1444,6 @@ class ModulesPanel(Vertical):
         if inp.display:
             inp.display = False
             inp.value = ""
-            self._pending_url = ""
             self._set_footer("")
             try:
                 self.query_one(ModuleTable).focus()
@@ -1422,11 +1551,10 @@ class NixStore(App):
     ModulesPanel { padding: 0 1; }
     ModuleTable { height: 1fr; }
     #mod-details { height: 3; border: round $primary-darken-2; padding: 0 1; }
-    #mod-log { height: 8; border: round $primary-darken-2; }
     #mod-footer { height: 1; padding: 0 1; background: $boost; }
 
     /* ── modals ── */
-    ApplyScreen, FlatpakApplyScreen { align: center middle; }
+    ApplyScreen, FlatpakApplyScreen, ModuleToggleScreen, ModuleAddScreen { align: center middle; }
     #dialog {
         width: 90%; height: 85%; padding: 1 2;
         border: thick $primary; background: $surface;
