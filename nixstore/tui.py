@@ -1006,11 +1006,12 @@ class ModulesPanel(Vertical):
         t = Text()
         source = mod.get("source", "")
         mod_type = mod.get("type", "")
+        status = mod.get("status", "")
         if source == "system":
             t.append("[system]", "dim purple")
         elif source == "user":
             t.append("[user]", "cyan")
-        if mod_type == "flake-module":
+        if mod_type == "flake-module" or status == "unregistered":
             if t.plain:
                 t.append(" ")
             t.append("[flake]", "green")
