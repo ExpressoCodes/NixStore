@@ -173,7 +173,7 @@ if [[ "${NIXSTORE_NONINTERACTIVE:-0}" = "1" ]]; then
 else
     sudo -v
 fi
-( while true; do sudo -n true; sleep 50; done ) &
+( while true; do sudo -n true; sleep 50; done ) </dev/null &>/dev/null &
 SUDO_KEEPALIVE_PID=$!
 trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
 
@@ -202,6 +202,14 @@ if [ -n "$DOTFILES" ] && [ -d "$DOTFILES/nixos" ]; then
         [ "$fname" = "flake.lock" ] && continue
         if [ "$fname" = "packages.json" ] && [ -f "$dest" ]; then
             skip "packages.json (managed by NixStore — skipping)"
+            continue
+        fi
+        if [ "$fname" = "flake.nix" ] && [ -f "$dest" ]; then
+            skip "flake.nix (managed by NixStore — skipping)"
+            continue
+        fi
+        if [ "$fname" = "modules.json" ] && [ -f "$dest" ]; then
+            skip "modules.json (managed by NixStore — skipping)"
             continue
         fi
         _efi_bool="false"; [ "$BOOT_MODE" = "efi" ] && _efi_bool="true"
