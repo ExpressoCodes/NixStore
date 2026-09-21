@@ -274,7 +274,12 @@ def check_system_updates(flake: Path) -> SystemUpdateStatus:
     repo_str = vars_.get("DOTFILES_REPO")
     repo = Path(repo_str) if repo_str else flake
     if not (repo / ".git").exists():
-        return SystemUpdateStatus(is_git_repo=False, commits_behind=0, commits=[], flake_inputs_updated=[])
+        return SystemUpdateStatus(
+            is_git_repo=False,
+            commits_behind=0,
+            commits=[],
+            flake_inputs_updated=_check_flake_inputs(flake),
+        )
     git = shutil.which("git") or "git"
 
     def run(*args: str) -> str:
@@ -351,14 +356,6 @@ async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # n
     """
     vars_ = read_dotfiles_vars()
     dotfiles_str = vars_.get("DOTFILES_REPO")
-    if not dotfiles_str:
-        await log_cb("DOTFILES_REPO not set in /etc/nixos/.dotfiles-vars — run install.sh first.")
-        return False
-    dotfiles = Path(dotfiles_str)
-    update_sh = dotfiles / "update.sh"
-    if not update_sh.exists():
-        await log_cb(f"update.sh not found at {update_sh}")
-        return False
 
     import stat as _stat
     tmpdir = tempfile.mkdtemp(prefix="nixstore-")
@@ -413,6 +410,25 @@ async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # n
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 drain_task.cancel()
             return proc.returncode
+
+        if not dotfiles_str:
+            await log_cb("No dotfiles repo configured — running nix flake update + nixos-rebuild.")
+            rc = await _stream(["sudo", "nix", "flake", "update", "--flake", str(flake)])
+            if rc != 0:
+                await log_cb("nix flake update failed.")
+                return False
+            rc = await _stream(["sudo", "nixos-rebuild", "switch", "--flake", str(flake)])
+            return rc == 0
+        dotfiles = Path(dotfiles_str)
+        update_sh = dotfiles / "update.sh"
+        if not update_sh.exists():
+            await log_cb(f"update.sh not found at {update_sh} — running nix flake update + nixos-rebuild.")
+            rc = await _stream(["sudo", "nix", "flake", "update", "--flake", str(flake)])
+            if rc != 0:
+                await log_cb("nix flake update failed.")
+                return False
+            rc = await _stream(["sudo", "nixos-rebuild", "switch", "--flake", str(flake)])
+            return rc == 0
 
         # Stash any local changes so git pull --ff-only won't be blocked.
         await log_cb(f"==> git stash {dotfiles}")

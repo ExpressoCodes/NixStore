@@ -364,8 +364,8 @@ class SystemUpdatePanel(Vertical):
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
             self._last_status = status
-            if not status.is_git_repo:
-                status_widget.update(Text("Dotfiles repo not configured — run install.sh first.", "dim"))
+            if not status.is_git_repo and not status.flake_inputs_updated:
+                status_widget.update(Text("Dotfiles repo not configured. No flake input updates available.", "dim"))
                 self._set_footer("r to re-check")
                 return
 
