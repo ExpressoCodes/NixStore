@@ -1044,7 +1044,7 @@ class ModulesPanel(Vertical):
         if status in ("enabled", "disabled"):
             return "Space: toggle  d: remove" if source == "user" else "Space: toggle"
         if status == "unregistered":
-            return "r: register"
+            return "r: register  d: remove from flake.nix"
         if status == "missing":
             return "d: remove from registry"
         return ""
@@ -1120,7 +1120,15 @@ class ModulesPanel(Vertical):
         status = mod.get("status", "")
         source = mod.get("source", "")
         if status == "unregistered":
-            self.notify("Unregistered inputs are not in the registry — nothing to remove.", severity="warning")
+            try:
+                core.remove_unregistered_input(name, self.cfg.flake_file)
+                self.notify(
+                    f"Removed '{name}' from flake.nix. Run nixos-rebuild to apply.",
+                    severity="information",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.notify(str(exc), severity="error")
+            self.load_modules()
             return
         if source == "system":
             self.notify("System modules cannot be removed.", severity="warning")

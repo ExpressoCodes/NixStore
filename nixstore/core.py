@@ -622,6 +622,28 @@ def remove_module(
         _sudo_write(flake_file_path, new_text)
 
 
+def remove_unregistered_input(name: str, flake_file_path: str | Path) -> None:
+    """Remove a flake input that is in flake.lock but not in the registry.
+
+    Strips the `<name>.url = "...";` line from flake.nix so the input is
+    dropped from flake.lock on the next rebuild. Does NOT call rebuild().
+    """
+    flake_file_path = Path(flake_file_path)
+    text = flake_file_path.read_text()
+    new_text = re.sub(
+        rf"^[^\S\n]*{re.escape(name)}\.url\s*=\s*\"[^\"]*\";\s*\n",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    if new_text == text:
+        raise ValueError(
+            f"Could not find '{name}.url = ...' in {flake_file_path}. "
+            "Remove it manually from flake.nix."
+        )
+    _sudo_write(flake_file_path, new_text)
+
+
 def register_input(
     name: str,
     modules_path: str | Path,
