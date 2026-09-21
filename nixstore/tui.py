@@ -243,15 +243,12 @@ class UpdateApplyScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         info = Text()
-        if self.status.commits_behind:
-            info.append(f"{self.status.commits_behind} update(s) to apply:\n\n", "bold")
-            for c in self.status.commits[:8]:
-                info.append(f"  {c}\n", "dim")
+        if self.status.flake_inputs_updated:
+            info.append(f"{len(self.status.flake_inputs_updated)} input(s) to update:\n\n", "bold")
+            for inp in self.status.flake_inputs_updated[:8]:
+                info.append(f"  {inp}\n", "dim")
             info.append("\n")
-        info.append("Will run: ", "dim")
-        if self.status.is_git_repo:
-            info.append("git pull  →  ", "dim")
-        info.append("update.sh (dotfiles sync + nixos-rebuild switch)", "dim")
+        info.append("Will run: nix flake update → nixos-rebuild switch", "dim")
         with Vertical(id="dialog"):
             yield Label("Apply System Update", id="dialog-title")
             yield Static(info, id="su-modal-status")
@@ -364,27 +361,15 @@ class SystemUpdatePanel(Vertical):
         try:
             status = await asyncio.to_thread(core.check_system_updates, self.cfg.flake)
             self._last_status = status
-            if not status.is_git_repo and not status.flake_inputs_updated:
-                status_widget.update(Text("Dotfiles repo not configured. No flake input updates available.", "dim"))
-                self._set_footer("r to re-check")
-                return
-
             if not status.has_updates:
                 status_widget.update(Text("✓ Up to date.", "green"))
                 self._set_footer("r to re-check")
                 return
 
             summary = Text()
-            if status.commits_behind:
-                summary.append(f"{status.commits_behind} new dotfiles commit(s):\n\n", "bold")
-                for c in status.commits[:8]:
-                    summary.append(f"  {c}\n", "dim")
-                if status.flake_inputs_updated:
-                    summary.append("\n")
-            if status.flake_inputs_updated:
-                summary.append(f"{len(status.flake_inputs_updated)} package input(s) updated:\n\n", "bold")
-                for inp in status.flake_inputs_updated:
-                    summary.append(f"  {inp}\n", "dim")
+            summary.append(f"{len(status.flake_inputs_updated)} input(s) can be updated:\n\n", "bold")
+            for inp in status.flake_inputs_updated:
+                summary.append(f"  {inp}\n", "dim")
             status_widget.update(summary)
             self._set_footer("u to apply · r to re-check")
         finally:
