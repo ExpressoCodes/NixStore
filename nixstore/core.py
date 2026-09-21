@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -295,28 +296,67 @@ def _check_flake_inputs(flake: Path) -> list[str]:
         return []
 
 
-async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # noqa: ANN001
-    """Update all flake inputs and rebuild NixOS."""
+def _bundled_update_script() -> str:
+    """Return path to the bundled update.sh — env var set by the Nix wrapper, else repo fallback."""
+    env_path = os.environ.get("NIXSTORE_UPDATE_SCRIPT", "")
+    if env_path and Path(env_path).is_file():
+        return env_path
+    # Development fallback: look relative to this file
+    candidate = Path(__file__).parent.parent / "data" / "update.sh"
+    return str(candidate) if candidate.is_file() else env_path
 
-    async def _stream(cmd: list[str]) -> int:
+
+async def run_system_update(flake: Path, log_cb, password_cb=None) -> bool:  # noqa: ANN001
+    """Run the bundled update.sh which self-updates nixstore then does a full system update."""
+    password = ""
+    if password_cb is not None:
+        password = await password_cb("sudo password")
+
+    script_path = _bundled_update_script()
+    if not script_path or not Path(script_path).is_file():
+        await log_cb("ERROR: update.sh not found. Rebuild nixstore to install it.")
+        return False
+
+    # Write a temporary SUDO_ASKPASS helper so the script can authenticate
+    askpass_file = None
+    pw_file = None
+    try:
+        if password:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".pw", delete=False, prefix="nixstore-pw-"
+            ) as f:
+                f.write(password)
+                pw_file = f.name
+            os.chmod(pw_file, stat.S_IRUSR)
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".sh", delete=False, prefix="nixstore-askpass-"
+            ) as f:
+                f.write(f"#!/bin/sh\ncat '{pw_file}'\n")
+                askpass_file = f.name
+            os.chmod(askpass_file, stat.S_IRWXU)
+
+        env = os.environ.copy()
+        env["NIXSTORE_NONINTERACTIVE"] = "1"
+        env["NIXSTORE_FLAKE"] = str(flake)
+        if askpass_file:
+            env["SUDO_ASKPASS"] = askpass_file
+
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            "bash", script_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=env,
         )
         assert proc.stdout is not None
         async for raw in proc.stdout:
             await log_cb(raw.decode(errors="replace").rstrip("\n"))
         await proc.wait()
-        return proc.returncode or 0
-
-    await log_cb("==> nix flake update")
-    if await _stream(["sudo", "nix", "flake", "update", "--flake", str(flake)]) != 0:
-        await log_cb("nix flake update failed.")
-        return False
-
-    await log_cb("==> nixos-rebuild switch")
-    return await _stream(["sudo", "nixos-rebuild", "switch", "--flake", str(flake)]) == 0
+        return (proc.returncode or 0) == 0
+    finally:
+        for p in (askpass_file, pw_file):
+            if p:
+                Path(p).unlink(missing_ok=True)
 
 
 # --- flatpak ------------------------------------------------------------------

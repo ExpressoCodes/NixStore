@@ -12,6 +12,7 @@
   # in the environment still take precedence.
   flake ? null,
   packagesFile ? null,
+  dotfilesDir ? null,
 }:
 
 python3Packages.buildPythonApplication {
@@ -35,13 +36,18 @@ python3Packages.buildPythonApplication {
   nativeCheckInputs = [ python3Packages.pytestCheckHook ];
 
   makeWrapperArgs =
-    [ "--prefix" "PATH" ":" (lib.makeBinPath [ libnotify ]) ]
+    [
+      "--prefix" "PATH" ":" (lib.makeBinPath [ libnotify ])
+      "--set" "NIXSTORE_UPDATE_SCRIPT" "${placeholder "out"}/share/nixstore/update.sh"
+    ]
     ++ lib.optionals (flake != null) [ "--set-default" "NIXSTORE_FLAKE" flake ]
-    ++ lib.optionals (packagesFile != null) [ "--set-default" "NIXSTORE_PACKAGES_FILE" packagesFile ];
+    ++ lib.optionals (packagesFile != null) [ "--set-default" "NIXSTORE_PACKAGES_FILE" packagesFile ]
+    ++ lib.optionals (dotfilesDir != null) [ "--set-default" "NIXSTORE_DOTFILES" dotfilesDir ];
 
   postInstall =
     ''
       install -Dm644 data/nixstore.desktop $out/share/applications/nixstore.desktop
+      install -Dm755 data/update.sh $out/share/nixstore/update.sh
       for icon in data/icons/hicolor/*/apps/nixstore.png; do
         install -Dm644 "$icon" "$out/share/icons/''${icon#data/icons/}"
       done

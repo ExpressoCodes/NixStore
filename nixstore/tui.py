@@ -248,7 +248,7 @@ class UpdateApplyScreen(ModalScreen[bool]):
             for inp in self.status.flake_inputs_updated[:8]:
                 info.append(f"  {inp}\n", "dim")
             info.append("\n")
-        info.append("Will run: nix flake update → nixos-rebuild switch", "dim")
+        info.append("Will self-update NixStore, sync dotfiles, update all flake inputs and rebuild.", "dim")
         with Vertical(id="dialog"):
             yield Label("Apply System Update", id="dialog-title")
             yield Static(info, id="su-modal-status")
@@ -1203,6 +1203,7 @@ class ModulesPanel(Vertical):
         def progress(line: str) -> None:
             self.app.call_from_thread(log.write, Text.from_ansi(line))
 
+        succeeded = False
         try:
             name = await asyncio.to_thread(
                 core.add_flake_module,
@@ -1214,17 +1215,19 @@ class ModulesPanel(Vertical):
                 progress,
                 password,
             )
+            succeeded = True
             self.notify(f"Added module '{name}'.", severity="information")
-            self._set_footer(f"✓ Added '{name}'.", "bold green")
+            self._set_footer(f"✓ Added '{name}'. Esc to close log.", "bold green")
         except Exception as exc:  # noqa: BLE001
             self.notify(str(exc), severity="error")
-            self._set_footer(str(exc), "bold red")
+            self._set_footer(f"✗ {exc}  (see log above · Esc to close)", "bold red")
         finally:
             self._busy = False
-            try:
-                self.query_one("#mod-log").display = False
-            except Exception:  # noqa: BLE001
-                pass
+            if succeeded:
+                try:
+                    self.query_one("#mod-log").display = False
+                except Exception:  # noqa: BLE001
+                    pass
         self.load_modules()
 
     @on(DataTable.RowHighlighted)
