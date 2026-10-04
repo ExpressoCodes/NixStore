@@ -875,7 +875,7 @@ class ModuleToggleScreen(ModalScreen[bool]):
     def __init__(self, cfg: Config, name: str, enable: bool) -> None:
         super().__init__()
         self.cfg = cfg
-        self.name = name
+        self.mod_name = name
         self.enable = enable
         self.running = False
         self.succeeded = False
@@ -883,7 +883,7 @@ class ModuleToggleScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         verb = "Install" if self.enable else "Uninstall"
         with Vertical(id="dialog"):
-            yield Label(f"{verb} {self.name}", id="dialog-title")
+            yield Label(f"{verb} {self.mod_name}", id="dialog-title")
             yield Input(password=True, placeholder="sudo password", id="password")
             yield RichLog(id="log", wrap=True, markup=False)
             yield Label("Enter sudo password and press Enter · Esc: cancel", id="status")
@@ -931,7 +931,7 @@ class ModuleToggleScreen(ModalScreen[bool]):
             self.set_status(f"{verb}… (rebuilding NixOS, please wait)", "bold yellow")
 
             await asyncio.to_thread(
-                core.toggle_module_registry, self.name, self.enable,
+                core.toggle_module_registry, self.mod_name, self.enable,
                 self.cfg.modules_file, password
             )
 
@@ -944,14 +944,14 @@ class ModuleToggleScreen(ModalScreen[bool]):
             verb_done = "Installed" if self.enable else "Uninstalled"
             if ok:
                 self.succeeded = True
-                self.set_status(f"✓ {verb_done} '{self.name}' — Esc: back", "bold green")
-                core.notify("Module updated", self.name)
+                self.set_status(f"✓ {verb_done} '{self.mod_name}' — Esc: back", "bold green")
+                core.notify("Module updated", self.mod_name)
             else:
                 self.set_status(
                     f"✗ Rebuild failed — module registry was updated · Esc: back",
                     "bold red",
                 )
-                core.notify("Module rebuild failed", self.name, "critical")
+                core.notify("Module rebuild failed", self.mod_name, "critical")
         finally:
             self.running = False
 
