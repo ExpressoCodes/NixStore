@@ -50,7 +50,7 @@ def _sudo_write(path: Path, content: str, password: str = "") -> None:
             cmd = ["sudo", "-S", "-p", "", "install", "-m", "644", tmp_path, str(path)]
             subprocess.run(
                 cmd,
-                input=(password + "\n").encode() if password else None,
+                input=(password + "\n").encode() if password else b"",
                 check=True,
             )
         finally:
@@ -469,11 +469,11 @@ def load_modules(path: str | Path) -> dict:
         raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
 
 
-def save_modules(path: str | Path, data: dict) -> None:
+def save_modules(path: str | Path, data: dict, password: str = "") -> None:
     """Atomically write modules registry JSON to path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _sudo_write(path, json.dumps(data, indent=2) + "\n")
+    _sudo_write(path, json.dumps(data, indent=2) + "\n", password)
 
 
 def rebuild(flake_dir: str | Path) -> None:
@@ -600,7 +600,7 @@ def remove_module(
         )
 
     del registry[name]
-    save_modules(modules_path, registry)
+    save_modules(modules_path, registry, password)
 
     # Remove from flake.nix if applicable
     input_name = entry.get("input") if entry.get("type") == "flake-module" else None
