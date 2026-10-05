@@ -8,7 +8,7 @@ A terminal app store for NixOS. Search nixpkgs, mark packages to install or
 remove, and apply everything with one `nixos-rebuild switch`, without editing
 Nix files by hand.
 
-![NixStore](docs/screenshot.png)
+![NixStore](docs/screenshot-v2.png)
 
 - **Live search** across your flake's pinned nixpkgs: exact names first, then
   prefixes, then substrings (`brave` → `brave`, `brave-origin`, `brave-search-cli`)

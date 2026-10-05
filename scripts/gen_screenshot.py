@@ -61,7 +61,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT = REPO_ROOT / "docs" / "screenshot.png"
+DEFAULT_OUTPUT = REPO_ROOT / "docs" / "screenshot-v2.png"
 
 # Match the committed screenshot.
 TERMINAL_SIZE = (126, 34)
