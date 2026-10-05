@@ -956,6 +956,97 @@ class ModuleToggleScreen(ModalScreen[bool]):
             self.running = False
 
 
+class ModuleInstallAllScreen(ModalScreen[bool]):
+    """Modal to install (enable) all registered flake modules with one nixos-rebuild."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, cfg: Config, names: list[str]) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.mod_names = names
+        self.running = False
+        self.succeeded = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            count = len(self.mod_names)
+            yield Label(f"Install all flakes ({count})", id="dialog-title")
+            yield Input(password=True, placeholder="sudo password", id="password")
+            yield RichLog(id="log", wrap=True, markup=False)
+            yield Label("Enter sudo password and press Enter · Esc: cancel", id="status")
+
+    def on_mount(self) -> None:
+        self.query_one("#log").display = False
+        self.query_one("#password").focus()
+
+    def set_status(self, text: str, style: str = "") -> None:
+        self.query_one("#status", Label).update(Text(text, style=style))
+
+    def action_close(self) -> None:
+        if not self.running:
+            self.dismiss(self.succeeded)
+
+    @on(Input.Submitted, "#password")
+    def submitted(self, event: Input.Submitted) -> None:
+        if not self.running and not self.succeeded:
+            password = event.value
+            event.input.value = ""
+            self.run_install_all(password)
+
+    @work(exclusive=True)
+    async def run_install_all(self, password: str) -> None:
+        self.running = True
+        pw_input = self.query_one("#password", Input)
+        log = self.query_one("#log", RichLog)
+        try:
+            self.set_status("Checking password…")
+            check = await asyncio.create_subprocess_exec(
+                "sudo", "-S", "-k", "-v", "-p", "",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await check.communicate((password + "\n").encode())
+            if check.returncode != 0:
+                self.set_status("Wrong password — try again · Esc: cancel", "bold red")
+                pw_input.focus()
+                return
+
+            pw_input.display = False
+            log.display = True
+            self.set_status(
+                "Installing all flakes… (rebuilding NixOS, please wait)", "bold yellow"
+            )
+
+            for name in self.mod_names:
+                await asyncio.to_thread(
+                    core.toggle_module_registry, name, True,
+                    self.cfg.modules_file, password
+                )
+
+            def log_cb(line: str) -> None:
+                log.write(Text.from_ansi(line))
+
+            ok = await core.rebuild_stream(self.cfg.flake, password, log_cb)
+            del password
+
+            if ok:
+                self.succeeded = True
+                self.set_status(
+                    f"✓ Installed {len(self.mod_names)} flake(s) — Esc: back", "bold green"
+                )
+                core.notify("Flakes installed", f"{len(self.mod_names)} module(s)")
+            else:
+                self.set_status(
+                    "✗ Rebuild failed — module registry was updated · Esc: back",
+                    "bold red",
+                )
+                core.notify("Flake rebuild failed", "install all", "critical")
+        finally:
+            self.running = False
+
+
 class ModuleAddScreen(ModalScreen[bool]):
     """Modal to add a flake URL as a module (nix flake update + sudo install)."""
 
@@ -1047,7 +1138,7 @@ class ModuleTable(DataTable):
     """Focusable row-cursor table for the Modules panel."""
 
     BINDINGS = [
-        Binding("i", "install_mod", "Install"),
+        Binding("ctrl+s", "install_all_mods", "Install all"),
         Binding("u", "uninstall_mod", "Uninstall"),
         Binding("a", "add_url", "Add URL"),
         Binding("d", "remove_mod", "Delete"),
@@ -1071,9 +1162,9 @@ class ModuleTable(DataTable):
                 return node
         return None
 
-    def action_install_mod(self) -> None:
+    def action_install_all_mods(self) -> None:
         if (p := self._panel()) is not None:
-            p.action_install()
+            p.action_install_all()
 
     def action_uninstall_mod(self) -> None:
         if (p := self._panel()) is not None:
@@ -1223,7 +1314,7 @@ class ModulesPanel(Vertical):
         if status == "enabled":
             return "u: uninstall" + ("  d: delete" if source == "user" else "")
         if status == "disabled":
-            return "i: install" + ("  d: delete" if source == "user" else "")
+            return "Ctrl+S: install all" + ("  d: delete" if source == "user" else "")
         if status == "unregistered":
             return "r: register  d: delete from flake.nix"
         if status == "missing":
@@ -1241,17 +1332,20 @@ class ModulesPanel(Vertical):
             return None
         return next((m for m in self._modules if m["name"] == name), None)
 
-    def action_install(self) -> None:
+    def action_install_all(self) -> None:
         if self._busy:
             self.notify("Busy — please wait.", severity="warning")
             return
-        mod = self._get_highlighted_mod()
-        if mod is None:
+        names = [
+            m["name"] for m in self._modules if m.get("status") == "disabled"
+        ]
+        if not names:
+            self.notify(
+                "No registered flakes to install — all are already installed.",
+                severity="information",
+            )
             return
-        if mod.get("status") != "disabled":
-            self.notify("Module is not disabled — nothing to install.", severity="warning")
-            return
-        self._run_toggle(mod["name"], enable=True)
+        self._run_install_all(names)
 
     def action_uninstall(self) -> None:
         if self._busy:
@@ -1280,6 +1374,22 @@ class ModulesPanel(Vertical):
             except Exception:  # noqa: BLE001
                 pass
         self.app.push_screen(ModuleToggleScreen(self.cfg, name, enable), done)
+
+    def _run_install_all(self, names: list[str]) -> None:
+        self._busy = True
+        def done(succeeded: bool | None) -> None:
+            self._busy = False
+            if succeeded:
+                self.notify(
+                    f"Installed {len(names)} flake(s).",
+                    severity="information",
+                )
+            self.load_modules()
+            try:
+                self.query_one(ModuleTable).focus()
+            except Exception:  # noqa: BLE001
+                pass
+        self.app.push_screen(ModuleInstallAllScreen(self.cfg, names), done)
 
     def action_add(self) -> None:
         if self._busy:
@@ -1420,8 +1530,6 @@ class ModulesPanel(Vertical):
             return
         if mod.get("status") == "enabled":
             self.action_uninstall()
-        elif mod.get("status") == "disabled":
-            self.action_install()
 
     # --- interface for NixStore app -------------------------------------------
 
@@ -1554,7 +1662,7 @@ class NixStore(App):
     #mod-footer { height: 1; padding: 0 1; background: $boost; }
 
     /* ── modals ── */
-    ApplyScreen, FlatpakApplyScreen, ModuleToggleScreen, ModuleAddScreen { align: center middle; }
+    ApplyScreen, FlatpakApplyScreen, ModuleToggleScreen, ModuleInstallAllScreen, ModuleAddScreen { align: center middle; }
     #dialog {
         width: 90%; height: 85%; padding: 1 2;
         border: thick $primary; background: $surface;
