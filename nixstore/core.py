@@ -608,9 +608,11 @@ def remove_module(
         escaped = re.escape(input_name)
         text = flake_file_path.read_text()
 
-        # Remove the .url = "..."; line (required)
+        # Remove the input (required). Matches both the bare form
+        # `<name>.url = "...";` and the attribute-set form
+        # `<name> = { url = "..."; inputs.nixpkgs.follows = "nixpkgs"; };`.
         new_text = re.sub(
-            rf"^[^\S\n]*{escaped}\.url\s*=\s*\"[^\"]*\";\s*\n",
+            rf"^[^\S\n]*{escaped}(?:\.url\s*=\s*\"[^\"]*\"|\s*=\s*\{{[^{{}}]*\}})\s*;[^\S\n]*\n",
             "",
             text,
             flags=re.MULTILINE,
@@ -652,9 +654,11 @@ def remove_unregistered_input(name: str, flake_file_path: str | Path, password: 
     text = flake_file_path.read_text()
     escaped = re.escape(name)
 
-    # Remove the .url = "..."; line (required — fail if missing)
+    # Remove the input (required — fail if missing). Matches both the bare form
+    # `<name>.url = "...";` and the attribute-set form
+    # `<name> = { url = "..."; inputs.nixpkgs.follows = "nixpkgs"; };`.
     new_text = re.sub(
-        rf"^[^\S\n]*{escaped}\.url\s*=\s*\"[^\"]*\";\s*\n",
+        rf"^[^\S\n]*{escaped}(?:\.url\s*=\s*\"[^\"]*\"|\s*=\s*\{{[^{{}}]*\}})\s*;[^\S\n]*\n",
         "",
         text,
         flags=re.MULTILINE,
@@ -811,7 +815,20 @@ def add_flake_module(
             "Cannot insert input safely."
         )
 
-    insert_line = f"    {name}.url = \"{url}\";\n"
+    # Emit the attribute-set form with `inputs.nixpkgs.follows = "nixpkgs";` so
+    # the new input shares the root nixpkgs instead of pulling its own copy
+    # (which creates endlessly-renumbering duplicate nixpkgs nodes in
+    # flake.lock). `hyprland` is deliberately excluded: it needs its own pinned
+    # nixpkgs for Cachix binary-cache hits, so it stays in the bare form.
+    if name == "hyprland":
+        insert_line = f"    {name}.url = \"{url}\";\n"
+    else:
+        insert_line = (
+            f"    {name} = {{\n"
+            f"      url = \"{url}\";\n"
+            f"      inputs.nixpkgs.follows = \"nixpkgs\";\n"
+            f"    }};\n"
+        )
     new_flake_text = orig_text[:inputs_end] + insert_line + orig_text[inputs_end:]
 
     # Run nix flake update as the current user in a temp dir so nix uses the

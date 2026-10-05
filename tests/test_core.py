@@ -112,6 +112,75 @@ def test_transaction_files_and_argv(cfg: Config) -> None:
     assert not tmp.exists()
 
 
+FLAKE_WITH_ATTRSET_INPUT = '''\
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    hyprland.url = "github:hyprwm/Hyprland";
+    LocalSend = {
+      url = "github:foo/LocalSend";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+  outputs = inputs: { };
+}
+'''
+
+FLAKE_WITH_BARE_INPUT = '''\
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    LocalSend.url = "github:foo/LocalSend";
+  };
+  outputs = inputs: { };
+}
+'''
+
+
+def test_remove_unregistered_input_removes_attrset_form(tmp_path: Path) -> None:
+    flake = tmp_path / "flake.nix"
+    flake.write_text(FLAKE_WITH_ATTRSET_INPUT)
+    core.remove_unregistered_input("LocalSend", flake)
+    out = flake.read_text()
+    assert "LocalSend" not in out
+    # Untouched inputs survive, including hyprland (bare) and nixpkgs.
+    assert 'nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";' in out
+    assert 'hyprland.url = "github:hyprwm/Hyprland";' in out
+    # The follows line belonging to the removed input is gone too.
+    assert "follows" not in out
+
+
+def test_remove_unregistered_input_removes_bare_form(tmp_path: Path) -> None:
+    flake = tmp_path / "flake.nix"
+    flake.write_text(FLAKE_WITH_BARE_INPUT)
+    core.remove_unregistered_input("LocalSend", flake)
+    out = flake.read_text()
+    assert "LocalSend" not in out
+    assert 'nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";' in out
+
+
+def test_remove_unregistered_input_missing_raises(tmp_path: Path) -> None:
+    flake = tmp_path / "flake.nix"
+    flake.write_text(FLAKE_WITH_BARE_INPUT)
+    with pytest.raises(ValueError):
+        core.remove_unregistered_input("doesnotexist", flake)
+
+
+def test_remove_module_removes_attrset_form(tmp_path: Path) -> None:
+    flake = tmp_path / "flake.nix"
+    flake.write_text(FLAKE_WITH_ATTRSET_INPUT)
+    modules = tmp_path / "modules.json"
+    modules.write_text(json.dumps({
+        "LocalSend": {"source": "user", "enabled": True,
+                      "type": "flake-module", "input": "LocalSend"},
+    }) + "\n")
+    core.remove_module("LocalSend", modules, flake)
+    out = flake.read_text()
+    assert "LocalSend" not in out
+    assert "follows" not in out
+    assert "LocalSend" not in core.load_modules(modules)
+
+
 def test_config_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NIXSTORE_FLAKE", "/srv/flake")
     monkeypatch.setenv("NIXSTORE_PACKAGES_FILE", "/srv/flake/pkgs/list.json")
