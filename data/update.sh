@@ -95,10 +95,24 @@ if [[ "${1:-}" != "--skip-self-update" ]]; then
     echo ""
 fi
 
-# ── Pull latest dotfiles ───────────────────────────────────────────────────────
-if [ -n "$DOTFILES" ] && [ -d "$DOTFILES/.git" ]; then
-    bold "→ Pulling latest dotfiles ..."
-    git -C "$DOTFILES" pull --ff-only && echo "" || info "git pull failed — continuing with local dotfiles"
+# ── Refresh dotfiles source ─────────────────────────────────────────────────────
+# Two provisioning models are supported:
+#   • Flake-input model (recommended): DOTFILES points at a read-only /nix/store
+#     path produced by a flake input (e.g. programs.nixstore.dotfilesDir =
+#     inputs.nixpresso). The `nix flake update` run earlier in this script already
+#     bumped that input, and the rebuild baked the new store path into
+#     NIXSTORE_DOTFILES, so there is nothing to pull — the store path IS the latest.
+#     home-sync only READS $DOTFILES/home, so a read-only path is fine.
+#   • Legacy local-clone model: DOTFILES is a git working tree we pull --ff-only.
+if [ -n "$DOTFILES" ]; then
+    if [[ "$DOTFILES" == /nix/store/* ]] || ! git -C "$DOTFILES" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        bold "→ Dotfiles source is read-only (flake input) — skipping git pull ..."
+        info "refresh is driven by 'nix flake update' + rebuild; using $DOTFILES"
+        echo ""
+    elif [ -d "$DOTFILES/.git" ]; then
+        bold "→ Pulling latest dotfiles ..."
+        git -C "$DOTFILES" pull --ff-only && echo "" || info "git pull failed — continuing with local dotfiles"
+    fi
 fi
 
 # ── ~/.config + ~/.local (deployed by COPY via the shared self-heal engine) ──
