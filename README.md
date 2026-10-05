@@ -13,6 +13,7 @@ Nix files by hand.
 - **Live search** across your flake's pinned nixpkgs: exact names first, then
   prefixes, then substrings (`brave` → `brave`, `brave-origin`, `brave-search-cli`)
 - **Flatpak support**: search and manage Flathub apps alongside Nix packages
+- **Flake modules**: register other flakes and install all registered ones at once with `Ctrl+S`
 - **Queue changes** from the *Search* and *Installed* sub-tabs, apply them together
 - **Safe rebuilds**: if `nixos-rebuild` fails, your package list is restored
 - **System Update panel**: check for dotfiles upstream commits and apply them in one step
@@ -106,11 +107,12 @@ Without the module: `nix run github:ExpressoCodes/NixStore`, or use
 Launch **NixStore** from your app launcher, or run `nixstore`
 (`nixstore tui btop` opens it with a search).
 
-The sidebar has three sections — navigate with the mouse or arrow keys:
+The sidebar has four sections — navigate with the mouse or arrow keys:
 
-- **Nix Packages** — search nixpkgs and manage your `packages.json`
-- **Flatpak** — search Flathub and manage installed Flatpak apps
-- **System Update** — check for upstream dotfiles commits and apply them
+- 📦 **Nix Packages** — search nixpkgs and manage your `packages.json`
+- 📱 **Flatpaks** — search Flathub and manage installed Flatpak apps
+- ❄️ **Modules** — register other flakes and install all of them with `Ctrl+S`
+- 🔄 **System Update** — check for upstream dotfiles commits and apply them
 
 | Key | Action |
 | --- | --- |
@@ -148,6 +150,10 @@ nix develop
 pytest
 python -m nixstore --flake /etc/nixos
 ```
+
+Regenerate the README screenshot with
+`nix develop --command python3 scripts/gen_screenshot.py` (needs `rsvg-convert`
+from librsvg for the PNG step; see the script's docstring).
 
 ## License
 
