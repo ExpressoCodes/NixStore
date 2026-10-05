@@ -325,7 +325,7 @@ class SystemUpdatePanel(Vertical):
         self._last_status: SystemUpdateStatus | None = None
 
     def compose(self) -> ComposeResult:
-        yield Label("System Update", id="su-title")
+        yield Label("🔄 System Update", id="su-title")
         yield Static("Checking for updates…", id="su-status")
         yield Label("", id="su-footer")
 
@@ -393,10 +393,10 @@ class NixPackagesPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="nix-tabs"):
-            with TabPane("Search nixpkgs", id="nsearch"):
+            with TabPane("🔍 Search nixpkgs", id="nsearch"):
                 yield SearchInput(placeholder="Search packages…", id="nix-search-input")
                 yield PackageTable(id="nix-search-table")
-            with TabPane("Installed (0)", id="ninstalled"):
+            with TabPane("✅ Installed (0)", id="ninstalled"):
                 yield SearchInput(placeholder="Filter installed…", id="nix-installed-input")
                 yield PackageTable(id="nix-installed-table")
         yield Static(id="nix-details")
@@ -479,7 +479,7 @@ class NixPackagesPanel(Vertical):
             packages = [p for p in packages if all(w in p.lower for w in words)]
         self._fill(self.query_one("#nix-installed-table", PackageTable), packages)
         self.query_one("#nix-tabs", TabbedContent).get_tab("ninstalled").label = (
-            f"Installed ({len(self.installed)})"
+            f"✅ Installed ({len(self.installed)})"
         )
 
     def _refresh_search_status(self) -> None:
@@ -635,10 +635,10 @@ class FlatpakPackagesPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="fp-tabs"):
-            with TabPane("Search Flathub", id="fsearch"):
+            with TabPane("🔍 Search Flathub", id="fsearch"):
                 yield SearchInput(placeholder="Search Flatpak apps…", id="fp-search-input")
                 yield PackageTable(id="fp-search-table")
-            with TabPane("Installed (0)", id="finstalled"):
+            with TabPane("✅ Installed (0)", id="finstalled"):
                 yield SearchInput(placeholder="Filter installed…", id="fp-installed-input")
                 yield PackageTable(id="fp-installed-table")
         yield Static(id="fp-details")
@@ -734,7 +734,7 @@ class FlatpakPackagesPanel(Vertical):
         ]
         self._fill_table(self.query_one("#fp-installed-table", PackageTable), packages + pending_installs)
         self.query_one("#fp-tabs", TabbedContent).get_tab("finstalled").label = (
-            f"Installed ({len(self.installed)})"
+            f"✅ Installed ({len(self.installed)})"
         )
 
     def _refresh_search_status(self) -> None:
@@ -1570,7 +1570,7 @@ class ModulesPanel(Vertical):
 # ── sidebar ────────────────────────────────────────────────────────────────────
 
 _NAV_PANELS = ["panel-nix", "panel-flatpak", "panel-modules", "panel-system"]
-_NAV_LABELS = ["  Nix Packages", "  Flatpaks", "  Modules", "⟳  System Update"]
+_NAV_LABELS = ["📦  Nix Packages", "📱  Flatpaks", "❄️  Modules", "🔄  System Update"]
 
 
 class Sidebar(Vertical):
