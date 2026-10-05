@@ -1,0 +1,34 @@
+# NixPresso home-config manifest.
+#
+# Format : <glob-relative-to-$HOME>  <class>
+# Match  : first match wins; a path not listed here defaults to `track-conservative`.
+# Globs  : `*` matches within one path segment, `**` matches across segments,
+#          `?` matches a single non-slash char. Everything else is literal.
+#
+# Classes
+#   track               Full 3-way sync. On conflict: take repo, back up the user's
+#                       file, journal it, offer the post-run resolver. Eligible to be
+#                       deleted when upstream drops the file. DESTRUCTIVE actions
+#                       (take-repo-overwrite, upstream-delete) apply ONLY to `track`.
+#   track-conservative  (default for any unlisted managed path) 3-way merge allowed,
+#                       but on conflict KEEP THE USER's file. Never a delete candidate.
+#   seed-once           Copied only if absent. Never merged, overwritten, deleted, or
+#                       baselined.
+#   generated           Owned by its generator (e.g. init-monitors.sh). Exempt from
+#                       baseline, merge, take-repo and delete. Any stale baseline for
+#                       the path is purged.
+#   ignore              Not managed at all.
+
+.config/hypr/monitors.lua            generated
+.config/hypr/.monitors.hash          generated
+.config/hypr/*.lua                    track
+.config/hypr/*.conf                   track
+.config/hypr/scripts/*                track
+.config/qs-dock/settings.json        seed-once
+.config/qs-dock/**                    track
+.config/quickshell/**                 track
+.config/kitty/**                      track
+.config/mako/**                       track
+.config/rofi/**                       track
+.local/share/rofi/**                  track
+.local/bin/*                          track

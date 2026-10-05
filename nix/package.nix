@@ -48,6 +48,10 @@ python3Packages.buildPythonApplication {
     ''
       install -Dm644 data/nixstore.desktop $out/share/applications/nixstore.desktop
       install -Dm755 data/update.sh $out/share/nixstore/update.sh
+      # Bundled home-config self-heal/merge engine + classification manifest.
+      # update.sh sources these from its own $out/share/nixstore/ directory.
+      install -Dm644 data/home-sync.sh $out/share/nixstore/home-sync.sh
+      install -Dm644 data/dotfiles-manifest $out/share/nixstore/dotfiles-manifest
       for icon in data/icons/hicolor/*/apps/nixstore.png; do
         install -Dm644 "$icon" "$out/share/icons/''${icon#data/icons/}"
       done

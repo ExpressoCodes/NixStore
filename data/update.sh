@@ -35,6 +35,44 @@ HOSTNAME_VAR="${DOTFILES_HOSTNAME:-$(hostname 2>/dev/null || echo nixos)}"
 # Resolve dotfiles dir: env var > vars file > unset (skip sync sections)
 DOTFILES="${NIXSTORE_DOTFILES:-${DOTFILES_REPO:-}}"
 
+# Directory this script lives in (bundled engine + manifest sit alongside it).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the bundled home-config deployment engine (lib/home-sync.sh, relocated
+# here as $SCRIPT_DIR/home-sync.sh). Requires DOTFILES to be set (the engine
+# aborts otherwise), so only call this when a dotfiles repo is resolved.
+#
+# Manifest resolution: the engine classifies paths from HS_MANIFEST. We prefer
+# the engine-matched BUNDLED copy ($SCRIPT_DIR/dotfiles-manifest) so the
+# classification always matches the shipped engine logic, and fall back to the
+# active repo's home/.dotfiles-manifest only if the bundled one is missing.
+_source_home_engine() {
+    if [ -f "$SCRIPT_DIR/dotfiles-manifest" ]; then
+        HS_MANIFEST="$SCRIPT_DIR/dotfiles-manifest"
+    elif [ -f "$DOTFILES/home/.dotfiles-manifest" ]; then
+        HS_MANIFEST="$DOTFILES/home/.dotfiles-manifest"
+    fi
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/home-sync.sh"
+}
+
+# ── Dry-run (--check): ZERO writes — no heal, cp, baseline, journal, quiesce,
+# kill, git mutation, self-update, sudo, or rebuild. Report what a real home
+# sync WOULD do, then exit. Intercepted BEFORE self-update on purpose. ─────────
+if [[ "${1:-}" == "--check" ]]; then
+    if [ -z "$DOTFILES" ] || [ ! -d "$DOTFILES/home" ]; then
+        info "No dotfiles repo resolved (set NIXSTORE_DOTFILES or DOTFILES_REPO) — nothing to check."
+        exit 0
+    fi
+    bold "→ Dry-run (--check): reporting planned home-config actions, no writes ..."
+    echo ""
+    _source_home_engine
+    hs_check
+    echo ""
+    bold "→ (--check) done — nothing was modified."
+    exit 0
+fi
+
 # ── Self-update nixstore ──────────────────────────────────────────────────────
 # Skip when already re-execed from the new binary.
 if [[ "${1:-}" != "--skip-self-update" ]]; then
@@ -63,89 +101,62 @@ if [ -n "$DOTFILES" ] && [ -d "$DOTFILES/.git" ]; then
     git -C "$DOTFILES" pull --ff-only && echo "" || info "git pull failed — continuing with local dotfiles"
 fi
 
-# ── ~/.config + ~/.local/share (copied from dotfiles/home/) ──────────────────
+# ── ~/.config + ~/.local (deployed by COPY via the shared self-heal engine) ──
+# This REPLACES the former inline copy-sync. The bundled engine
+# ($SCRIPT_DIR/home-sync.sh) performs, in the council-reviewed order:
+#   quiesce writers → self-heal (symlinked clone → real copies) → 3-way MERGE
+#   → fail-closed delete pass → regenerate generated files → resume writers
+#   → hyprctl reload (last). Every destructive step is crash-safe (write-ahead
+#   journal + fsync), baselines are seeded from shipped-new, and a real-run
+#   EXIT/INT/TERM trap always brings writers back if the run aborts mid-sync.
 if [ -n "$DOTFILES" ] && [ -d "$DOTFILES/home" ]; then
-    bold "→ Syncing home config (~/.config, ~/.local/share) ..."
+    bold "→ Syncing home config (~/.config, ~/.local) ..."
 
-    _is_text_file() { grep -qI '' "$1" 2>/dev/null; }
+    _source_home_engine
 
-    _backup_file() {
-        local file="$1" stamp
-        stamp=$(date +%Y%m%d-%H%M%S)
-        cp "$file" "${file}.bak.${stamp}"
-        echo "${file}.bak.${stamp}"
+    # Real-run safety net: under `set -euo pipefail` an unexpected failure
+    # between hs_quiesce_writers and hs_resume_writers would leave quickshell
+    # DOWN with no reload. This trap ALWAYS restores writers (and does the final
+    # hyprctl reload, via hs_resume_writers) on any exit — success, error, or
+    # interrupt — if quiesce ran but resume didn't. Idempotent (guarded by
+    # _hs_quiesced, cleared by hs_resume_writers). It also folds in the
+    # sudo-keepalive cleanup installed later, preserving the original exit code.
+    _hs_quiesced=0
+    _hs_cleanup() {
+        local ec=$?
+        trap - EXIT INT TERM        # disarm to avoid re-entry from our own exit
+        if [ "${_hs_quiesced:-0}" = "1" ]; then
+            _hs_warn "update exited with writers quiesced — restoring them ..."
+            hs_resume_writers || true   # includes the final hyprctl reload
+        fi
+        [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+        exit "$ec"                  # never mask the original exit code
     }
+    trap _hs_cleanup EXIT INT TERM
 
-    _sync_one_home_file() {
-        local src="$1" src_base="$2" dst_base="$3"
-        local rel dst baseline
-        rel="${src#"$src_base"/}"
-        dst="$dst_base/$rel"
-        baseline="$HOME_STATE_DIR/${dst_base##"$HOME"/}/$rel"
-        [[ "$src" =~ \.bak\.[0-9]{8}-[0-9]{6}$ ]] && return
-        mkdir -p "$(dirname "$dst")" "$(dirname "$baseline")"
-        if [ ! -f "$dst" ]; then
-            cp "$src" "$dst"; cp "$src" "$baseline"
-            ok "new: ~/${dst#"$HOME"/}"; return
-        fi
-        if cmp -s "$src" "$dst"; then
-            [ -f "$baseline" ] || cp "$src" "$baseline"
-            return
-        fi
-        if [[ "$src" == *.sh ]]; then
-            local bak; bak=$(_backup_file "$dst")
-            cp "$src" "$dst"; cp "$src" "$baseline"
-            ok "updated (script): ~/${dst#"$HOME"/}"; return
-        fi
-        if [ ! -f "$baseline" ]; then
-            if ! _is_text_file "$src"; then
-                cp "$src" "$dst"; cp "$src" "$baseline"
-                ok "updated (binary): ~/${dst#"$HOME"/}"; return
-            fi
-            if [[ "${NIXSTORE_NONINTERACTIVE:-0}" = "1" ]]; then
-                cp "$src" "$dst"; cp "$src" "$baseline"
-                ok "updated: ~/${dst#"$HOME"/}"; return
-            fi
-            bold "  ~/${dst#"$HOME"/} differs — update? [U/s]: "
-            read -r ans; ans="${ans:-u}"
-            if [[ "$ans" =~ ^[Uu] ]]; then
-                cp "$src" "$dst"; cp "$src" "$baseline"
-                ok "updated: ~/${dst#"$HOME"/}"
-            else
-                cp "$src" "$baseline"; skip "kept local: ~/${dst#"$HOME"/}"
-            fi
-            return
-        fi
-        cmp -s "$src" "$baseline" && return
-        if ! _is_text_file "$src" || ! command -v diff3 &>/dev/null; then
-            local bak; bak=$(_backup_file "$dst")
-            cp "$src" "$dst"; cp "$src" "$baseline"
-            ok "updated: ~/${dst#"$HOME"/}"; return
-        fi
-        local merged diff3_exit
-        set +e; merged=$(diff3 -m "$dst" "$baseline" "$src" 2>/dev/null); diff3_exit=$?; set -e
-        if [ "$diff3_exit" -eq 0 ]; then
-            if [ "$merged" = "$(cat "$dst")" ]; then cp "$src" "$baseline"
-            else printf '%s\n' "$merged" > "$dst"; cp "$src" "$baseline"; ok "merged: ~/${dst#"$HOME"/}"; fi
-        else
-            local bak; bak=$(_backup_file "$dst")
-            cp "$src" "$dst"; cp "$src" "$baseline"
-            printf '  \033[33m!\033[0m conflict in ~/%s — backup: %s\n' "${dst#"$HOME"/}" "$(basename "$bak")"
-        fi
-    }
+    hs_quiesce_writers
 
-    _sync_home_files() {
-        local src_base="$1" dst_base="$2"
-        [ -d "$src_base" ] || return 0
-        while IFS= read -r -d '' src; do
-            _sync_one_home_file "$src" "$src_base" "$dst_base"
-        done < <(find "$src_base" -type f -print0)
-    }
+    bold "→ Self-healing any symlinked install into real copies ..."
+    hs_selfheal
 
-    _sync_home_files "$DOTFILES/home/.config"      "$HOME/.config"
-    _sync_home_files "$DOTFILES/home/.local/share" "$HOME/.local/share"
-    _sync_home_files "$DOTFILES/home/.local/bin"   "$HOME/.local/bin"
-    [ -d "$HOME/.local/bin" ] && chmod +x "$HOME/.local/bin"/* 2>/dev/null || true
+    bold "→ Merging upstream home config (3-way) ..."
+    hs_sync_tree "$DOTFILES/home/.config"      "$HOME/.config"      644
+    hs_sync_tree "$DOTFILES/home/.local/share" "$HOME/.local/share" 644
+    hs_sync_tree "$DOTFILES/home/.local/bin"   "$HOME/.local/bin"   755
+    hs_delete_pass
+
+    # Generated files are owned by their generator — regenerate now (writers
+    # still quiesced; init-monitors.sh does its own atomic write + hash guard).
+    if command -v hyprctl &>/dev/null && hyprctl monitors &>/dev/null 2>&1; then
+        _init_monitors="$HOME/.config/hypr/scripts/init-monitors.sh"
+        if [ -f "$_init_monitors" ]; then
+            bold "→ Regenerating monitors.lua ..."
+            bash "$_init_monitors" && ok "monitors.lua updated" || info "init-monitors.sh failed — skipping"
+        fi
+    fi
+
+    # Bring writers back (qs-restart), then hyprctl reload LAST.
+    hs_resume_writers
     echo ""
 
     DCONF_SCRIPT="$DOTFILES/home/apply-dconf.sh"
@@ -175,7 +186,12 @@ else
 fi
 ( while true; do sudo -n true; sleep 50; done ) </dev/null &>/dev/null &
 SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
+# If the home-sync engine armed _hs_cleanup, it already kills this keepalive on
+# exit (and restores writers) — re-trapping here would clobber it. Only install
+# the plain keepalive cleanup when the engine trap is NOT in place.
+if ! declare -F _hs_cleanup >/dev/null 2>&1; then
+    trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
+fi
 
 # Sync /etc/nixos files from dotfiles
 if [ -n "$DOTFILES" ] && [ -d "$DOTFILES/nixos" ]; then
@@ -283,6 +299,22 @@ if command -v hyprctl &>/dev/null && hyprctl monitors &>/dev/null 2>&1; then
     bold "→ Reloading Hyprland ..."
     sleep 2
     hyprctl reload && ok "Hyprland reloaded" || info "hyprctl reload failed — reload manually"
+fi
+
+# ── Home-config conflict report ──────────────────────────────────────────────
+# One consolidated report of any `track` conflicts / heal-updates recorded by
+# the home-sync engine. The resolver is deployed as a dotfile (class `track`)
+# to ~/.local/bin/nixpresso-resolve-conflicts by the sync above, so by this
+# point it is present. Reference it by its deployed path; fall back to PATH.
+if [ -n "$DOTFILES" ] && [ -d "$DOTFILES/home" ]; then
+    _resolver="$HOME/.local/bin/nixpresso-resolve-conflicts"
+    if [ -x "$_resolver" ]; then
+        echo ""
+        "$_resolver" || true
+    elif command -v nixpresso-resolve-conflicts &>/dev/null; then
+        echo ""
+        nixpresso-resolve-conflicts || true
+    fi
 fi
 
 echo ""
